@@ -120,15 +120,18 @@ const hlfIndexHTML = `<!DOCTYPE html>
         function renderStages(stages) {
             const grid = document.getElementById('stage-grid');
             grid.innerHTML = '';
-            stages.forEach(stage => {
+            stages.forEach(function(stage) {
                 const card = document.createElement('div');
                 card.className = 'stage-card ' + stage.status;
                 card.style.borderLeftColor = stage.color;
-                card.innerHTML = `
-                    <div class="stage-title" style="color:${stage.color}">${stage.Name}</div>
-                    <div class="stage-desc">${stage.description}</div>
-                    <div class="stage-timer">Status: ${stage.status.toUpperCase()} ${stage.duration ? '| ' + stage.duration : ''}</div>
-                `;
+
+                var durationText = stage.duration ? (' | ' + stage.duration) : '';
+                
+                card.innerHTML = 
+                    '<div class="stage-title" style="color:' + stage.color + '">' + stage.name + '</div>' +
+                    '<div class="stage-desc">' + stage.description + '</div>' +
+                    '<div class="stage-timer">Status: ' + stage.status.toUpperCase() + durationText + '</div>';
+                
                 grid.appendChild(card);
             });
         }
