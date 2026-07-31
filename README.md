@@ -20,3 +20,13 @@ JavaScript JSON POST payload ───► /api/deploy/start
 curl -sSL https://bit.ly/2ysbOFE | bash -s -- 2.5.4 1.5.6
 
 go run cmd/main.go
+
+[ Client Request ] ──► [ Async HTTP Handler ] ──( 1. Immediate ACK )──► [ Client (202 Accepted) ]
+                             │
+                      ( 2. Push to Queue )
+                             ▼
+                    [ Lock-Free Ring Buffer ]
+                             │
+                      ( 3. Batch Pull )
+                             ▼
+                    [ 128 Worker Pool ] ──► [ In-Memory RAM Engine ]
