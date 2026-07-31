@@ -137,8 +137,10 @@ const hlfIndexHTML = `<!DOCTYPE html>
         .form-group { margin-bottom: 15px; }
         label { display: block; font-size: 0.85rem; color: #94a3b8; margin-bottom: 6px; }
         input, select { width: 100%; box-sizing: border-box; background: #0f172a; color: #fff; border: 1px solid #475569; padding: 10px; border-radius: 6px; }
-        .btn-tx { background: #38bdf8; color: #0f172a; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; font-size: 1rem; }
+        
+        .btn-tx { background: #38bdf8; color: #0f172a; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; font-size: 1rem; transition: all 0.2s ease; }
         .btn-tx:hover { background: #0284c7; color: #fff; }
+        .btn-tx:disabled { background: #475569 !important; color: #94a3b8 !important; cursor: not-allowed; opacity: 0.6; }
 
         .tx-log { background: #020617; border-radius: 6px; padding: 15px; height: 220px; overflow-y: auto; font-family: monospace; font-size: 0.82rem; color: #4ade80; }
         .console { background: #020617; border-radius: 10px; padding: 20px; height: 200px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 0.85rem; color: #38bdf8; border: 1px solid #1e293b; }
@@ -148,6 +150,17 @@ const hlfIndexHTML = `<!DOCTYPE html>
         .btn:disabled { background: #475569 !important; color: #94a3b8 !important; cursor: not-allowed; opacity: 0.7; }
         .btn.failed-btn { background: #ef4444 !important; color: #fff !important; }
         .btn.failed-btn:hover { background: #dc2626 !important; }
+
+        /* Pop-up Overlay Styling */
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.75); z-index: 1000; justify-content: center; align-items: center; }
+        .modal-card { background: #1e293b; border-radius: 12px; padding: 25px; width: 420px; text-align: center; border: 1px solid #475569; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5); }
+        .modal-card img { width: 140px; height: 140px; border-radius: 50%; object-fit: cover; margin-bottom: 15px; border: 3px solid #ef4444; }
+        .modal-title { font-size: 1.3rem; font-weight: bold; margin-bottom: 10px; }
+        .modal-title.success { color: #4ade80; }
+        .modal-title.error { color: #f87171; }
+        .modal-msg { color: #cbd5e1; font-size: 0.9rem; margin-bottom: 20px; line-height: 1.4; }
+        .modal-btn { background: #38bdf8; color: #0f172a; border: none; padding: 10px 20px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+        .modal-btn:hover { background: #0284c7; color: #fff; }
 
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
     </style>
@@ -183,23 +196,36 @@ const hlfIndexHTML = `<!DOCTYPE html>
                 <label>Delta Balance Shift (int64)</label>
                 <input type="number" id="txAmount" value="500" />
             </div>
-            <button class="btn-tx" onclick="submitTransaction()">Submit High-Speed Transaction</button>
+            <button class="btn-tx" id="btn-submit-tx" onclick="submitTransaction()" disabled>Submit High-Speed Transaction (Complete Setup First)</button>
         </div>
 
         <div class="panel">
             <h3 style="margin-top:0; color:#4ade80;">📜 Execution Receipts & Block Commit Stream</h3>
-            <div class="tx-log" id="tx-log-stream">No transactions executed yet. Submit one on the left!</div>
+            <div class="tx-log" id="tx-log-stream">Installation in progress. Complete deployment to unlock high-speed execution!</div>
         </div>
     </div>
 
     <h3 style="margin-top:30px;">Real-Time Terminal Execution Logs:</h3>
     <div class="console" id="console-logs">Waiting to launch deployment pipeline...</div>
 
+    <!-- POPUP MODAL -->
+    <div class="modal-overlay" id="popupModal">
+        <div class="modal-card">
+            <img id="modalImg" src="https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExM3hveThmc2prbWRrb3Bhdjl4dHZpMnBmeXZyd2J5eHZ2bXNpd3NxeSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/k3P1HSUatw23P8I3bX/giphy.gif" alt="Puppy GIF" />
+            <div id="modalTitle" class="modal-title">Notice</div>
+            <div id="modalMsg" class="modal-msg">Modal message text</div>
+            <button class="modal-btn" onclick="closeModal()">Close</button>
+        </div>
+    </div>
+
     <script>
         const evtSource = new EventSource('/api/deploy-stream');
         const logsDiv = document.getElementById('console-logs');
         const txLogDiv = document.getElementById('tx-log-stream');
         const deployBtn = document.getElementById('btn-deploy');
+        const submitTxBtn = document.getElementById('btn-submit-tx');
+
+        let popupShown = false;
 
         evtSource.onmessage = function(e) {
             const data = JSON.parse(e.data);
@@ -216,7 +242,7 @@ const hlfIndexHTML = `<!DOCTYPE html>
             
             let hasInProgress = false;
             let hasFailed = false;
-            let allCompleted = true;
+            let allCompleted = stages.length > 0;
 
             stages.forEach(function(stage) {
                 if (stage.status === 'in_progress') hasInProgress = true;
@@ -237,23 +263,44 @@ const hlfIndexHTML = `<!DOCTYPE html>
                 grid.appendChild(card);
             });
 
-            // Update Start Button States dynamically based on deployment progress
+            // Update Start Button & Submit Button States
             if (hasFailed) {
                 deployBtn.disabled = false;
                 deployBtn.className = 'btn failed-btn';
                 deployBtn.innerText = 'Retry Installation (Failed)';
+                
+                submitTxBtn.disabled = true;
+                submitTxBtn.innerText = 'Submit High-Speed Transaction (Setup Failed)';
+
+                if (!popupShown) {
+                    showModal(false, 'HLF Deployment Failed!', 'An error occurred during installation. Check execution logs below.');
+                    popupShown = true;
+                }
             } else if (hasInProgress) {
                 deployBtn.disabled = true;
                 deployBtn.className = 'btn';
                 deployBtn.innerText = 'Installation In Progress...';
+
+                submitTxBtn.disabled = true;
+                submitTxBtn.innerText = 'Submit High-Speed Transaction (Installing...)';
             } else if (allCompleted) {
                 deployBtn.disabled = true;
                 deployBtn.className = 'btn';
                 deployBtn.innerText = 'HLF Installed & Ready';
+
+                submitTxBtn.disabled = false;
+                submitTxBtn.innerText = 'Submit High-Speed Transaction';
+
+                if (!popupShown) {
+                    showModal(true, 'Installation Complete! 🎉', 'Hyperledger Fabric network is active. Transaction Studio is now unlocked!');
+                    popupShown = true;
+                }
             }
         }
 
         function submitTransaction() {
+            if (submitTxBtn.disabled) return;
+
             const channelId = document.getElementById('txChannel').value;
             const accountId = document.getElementById('txAccount').value;
             const amount = parseInt(document.getElementById('txAmount').value);
@@ -263,23 +310,57 @@ const hlfIndexHTML = `<!DOCTYPE html>
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ channelId: channelId, accountId: accountId, amount: amount })
             })
-            .then(res => res.json())
+            .then(res => {
+                if (!res.ok) throw new Error("Transaction execution failed on server.");
+                return res.json();
+            })
             .then(data => {
                 const logEntry = '<div>[' + data.appliedAt + '] <b>' + data.txId + '</b> | Acc: ' + data.account + ' | Shift: ' + data.deltaAmount + ' | Latency: <b>' + data.latencyUs + 'µs</b> | Total Txs: ' + data.totalTxs + '</div>';
-                if (txLogDiv.innerText.includes("No transactions executed yet")) {
+                if (txLogDiv.innerText.includes("Installation in progress") || txLogDiv.innerText.includes("Complete deployment")) {
                     txLogDiv.innerHTML = logEntry;
                 } else {
                     txLogDiv.innerHTML = logEntry + txLogDiv.innerHTML;
                 }
             })
-            .catch(err => alert("Error executing transaction: " + err));
+            .catch(err => {
+                showModal(false, 'Transaction Error!', 'Failed to process transaction: ' + err.message);
+            });
         }
 
         function startDeployment() {
+            popupShown = false;
             deployBtn.disabled = true;
             deployBtn.innerText = 'Installation In Progress...';
             logsDiv.innerHTML = '<div>> Initiating deployment triggers...</div>';
             fetch('/api/start-deploy', { method: 'POST' });
+        }
+
+        function showModal(isSuccess, title, message) {
+            const modal = document.getElementById('popupModal');
+            const modalImg = document.getElementById('modalImg');
+            const modalTitle = document.getElementById('modalTitle');
+            const modalMsg = document.getElementById('modalMsg');
+
+            modalTitle.innerText = title;
+            modalMsg.innerText = message;
+
+            if (isSuccess) {
+                modalTitle.className = 'modal-title success';
+                // Success icon
+                modalImg.src = 'https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExaG45Mm8xYWp0OXE1cTRxbzJrdDZwMzEwODk0eTVrNWs0Z2VraTF4ciZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/artj92V8o75VPL7AeQ/giphy.gif';
+                modalImg.style.borderColor = '#22c55e';
+            } else {
+                modalTitle.className = 'modal-title error';
+                // Smirking dog / puppy GIF for errors
+                modalImg.src = 'https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExM3hveThmc2prbWRrb3Bhdjl4dHZpMnBmeXZyd2J5eHZ2bXNpd3NxeSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/k3P1HSUatw23P8I3bX/giphy.gif';
+                modalImg.style.borderColor = '#ef4444';
+            }
+
+            modal.style.display = 'flex';
+        }
+
+        function closeModal() {
+            document.getElementById('popupModal').style.display = 'none';
         }
 
         function escapeHtml(text) {

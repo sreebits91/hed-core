@@ -1,10 +1,8 @@
 package hlf
 
 import (
-	"bufio"
-	"encoding/json"
+	"bytes"
 	"fmt"
-	"io"
 	"os/exec"
 	"sync"
 	"time"
@@ -19,123 +17,162 @@ const (
 	StatusFailed     StageStatus = "failed"
 )
 
-type DeployStage struct {
+type DeploymentStage struct {
 	ID          string      `json:"id"`
 	Name        string      `json:"name"`
-	Color       string      `json:"color"`
+	Description string      `json:"description"`
 	Status      StageStatus `json:"status"`
 	Duration    string      `json:"duration"`
-	Description string      `json:"description"`
+	Color       string      `json:"color"`
 }
 
 type Deployer struct {
-	HLFVersion string
-	Stages     []*DeployStage
-	mu         sync.Mutex
-	listeners  map[chan string]bool
+	version   string
+	listeners map[chan string]bool
+	mu        sync.Mutex
+	stages    []*DeploymentStage
 }
 
 func NewDeployer(version string) *Deployer {
 	return &Deployer{
-		HLFVersion: version,
-		listeners:  make(map[chan string]bool),
-		Stages: []*DeployStage{
-			{ID: "stage_1", Name: "Pre-requisites & Version Check", Color: "#3b82f6", Status: StatusPending, Description: "Validating Docker runtime, Go environment, and Fabric CLI availability."},
-			{ID: "stage_2", Name: "Binary & Docker Image Bootstrap", Color: "#a855f7", Status: StatusPending, Description: "Pulling Hyperledger Fabric binaries and core Docker images."},
-			{ID: "stage_3", Name: "Crypto Material & Artifact Gen", Color: "#f59e0b", Status: StatusPending, Description: "Generating TLS/MSP identity certs and genesis block definitions."},
-			{ID: "stage_4", Name: "Network Spin-up (Peers & Orderer)", Color: "#06b6d4", Status: StatusPending, Description: "Launching Fabric Orderer, Peer0.Org1, and Peer0.Org2 containers."},
-			{ID: "stage_5", Name: "Channel Creation & Chaincode Join", Color: "#10b981", Status: StatusPending, Description: "Creating channel 'mychannel', joining peers, and validating connection."},
+		version:   version,
+		listeners: make(map[chan string]bool),
+		stages: []*DeploymentStage{
+			{ID: "stage_1", Name: "Pre-requisites Check", Description: "Verify Docker & Go versions", Status: StatusPending, Color: "#38bdf8"},
+			{ID: "stage_2", Name: "Binary Bootstrap", Description: "Download Fabric binaries and images", Status: StatusPending, Color: "#818cf8"},
+			{ID: "stage_3", Name: "Network Teardown & Spin-up", Description: "Clean stale ledgers and launch Docker containers", Status: StatusPending, Color: "#fbbf24"},
+			{ID: "stage_4", Name: "Channel Creation & Join", Description: "Create mychannel and join peers", Status: StatusPending, Color: "#f472b6"},
+			{ID: "stage_5", Name: "Chaincode Deployment", Description: "Install & commit HED Smart Contracts", Status: StatusPending, Color: "#34d399"},
 		},
 	}
 }
 
 func (d *Deployer) RegisterListener(ch chan string) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.listeners[ch] = true
-	d.mu.Unlock()
 }
 
 func (d *Deployer) UnregisterListener(ch chan string) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	delete(d.listeners, ch)
-	d.mu.Unlock()
 }
 
-func (d *Deployer) BroadcastLog(stageID, logLine string) {
+func (d *Deployer) broadcast(logLine string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	payload, _ := json.Marshal(map[string]interface{}{
-		"stages":     d.Stages,
-		"hlfVersion": d.HLFVersion,
-		"log":        logLine,
-		"activeID":   stageID,
-	})
+	jsonPayload := fmt.Sprintf(`{"stages": %s, "log": %q}`, d.serializeStages(), logLine)
 
-	msg := fmt.Sprintf("data: %s\n\n", payload)
 	for ch := range d.listeners {
 		select {
-		case ch <- msg:
+		case ch <- fmt.Sprintf("data: %s\n\n", jsonPayload):
 		default:
 		}
 	}
 }
 
+func (d *Deployer) serializeStages() string {
+	var buf bytes.Buffer
+	buf.WriteString("[")
+	for i, s := range d.stages {
+		if i > 0 {
+			buf.WriteString(",")
+		}
+		buf.WriteString(fmt.Sprintf(`{"id":%q,"name":%q,"description":%q,"status":%q,"duration":%q,"color":%q}`,
+			s.ID, s.Name, s.Description, s.Status, s.Duration, s.Color))
+	}
+	buf.WriteString("]")
+	return buf.String()
+}
+
 func (d *Deployer) RunDeployment() {
-	for _, stage := range d.Stages {
-		d.mu.Lock()
-		stage.Status = StatusInProgress
-		d.mu.Unlock()
+	// Stage 1: Check Prereqs
+	d.executeStage(0, func() error {
+		return d.runCmd("docker", "version")
+	})
 
-		start := time.Now()
-		d.BroadcastLog(stage.ID, fmt.Sprintf("=== Starting Stage: %s ===", stage.Name))
+	// Stage 2: Download Binaries
+	d.executeStage(1, func() error {
+		cmd := exec.Command("./install-fabric.sh", "docker", "binary", "-f", d.version)
+		cmd.Dir = "fabric-samples"
+		return d.streamCmdOutput(cmd)
+	})
 
-		var err error
-		switch stage.ID {
-		case "stage_1":
-			err = d.execCmd(stage.ID, "bash", "-c", "docker --version && go version")
-		case "stage_2":
-			cmdStr := fmt.Sprintf("curl -sSL https://bit.ly/2ysbOFE | bash -s -- %s 1.5.6 -s -d", d.HLFVersion)
-			err = d.execCmd(stage.ID, "bash", "-c", cmdStr)
-		case "stage_3":
-			err = d.execCmd(stage.ID, "bash", "-c", "export PATH=$PATH:$(pwd)/fabric-samples/bin && which peer || echo 'Binaries installed successfully'")
-		case "stage_4":
-			err = d.execCmd(stage.ID, "bash", "-c", "cd fabric-samples/test-network && ./network.sh up -ca")
-		case "stage_5":
-			err = d.execCmd(stage.ID, "bash", "-c", "cd fabric-samples/test-network && ./network.sh createChannel -c mychannel")
-		}
+	// Stage 3: Teardown existing stale network & Spin up fresh peers
+	d.executeStage(2, func() error {
+		// Teardown stale networks and volumes first
+		cleanCmd := exec.Command("./network.sh", "down")
+		cleanCmd.Dir = "fabric-samples/test-network"
+		_ = d.streamCmdOutput(cleanCmd)
 
-		elapsed := time.Since(start).Round(time.Millisecond).String()
+		// Start fresh network
+		upCmd := exec.Command("./network.sh", "up", "-ca")
+		upCmd.Dir = "fabric-samples/test-network"
+		return d.streamCmdOutput(upCmd)
+	})
 
-		d.mu.Lock()
-		stage.Duration = elapsed
-		if err != nil {
-			stage.Status = StatusFailed
-			d.mu.Unlock()
-			d.BroadcastLog(stage.ID, fmt.Sprintf("❌ Error in %s: %v", stage.Name, err))
-			return
-		}
-		stage.Status = StatusCompleted
-		d.mu.Unlock()
+	// Stage 4: Create channel and join peers
+	d.executeStage(3, func() error {
+		cmd := exec.Command("./network.sh", "createChannel", "-c", "mychannel")
+		cmd.Dir = "fabric-samples/test-network"
+		return d.streamCmdOutput(cmd)
+	})
 
-		d.BroadcastLog(stage.ID, fmt.Sprintf("✅ Completed Stage: %s in %s", stage.Name, elapsed))
-		time.Sleep(500 * time.Millisecond)
+	// Stage 5: Deploy Chaincode
+	d.executeStage(4, func() error {
+		cmd := exec.Command("./network.sh", "deployCC", "-ccn", "basic", "-ccp", "../asset-transfer-basic/chaincode-go", "-ccl", "go")
+		cmd.Dir = "fabric-samples/test-network"
+		return d.streamCmdOutput(cmd)
+	})
+}
+
+func (d *Deployer) executeStage(idx int, fn func() error) {
+	s := d.stages[idx]
+	s.Status = StatusInProgress
+	start := time.Now()
+	d.broadcast(fmt.Sprintf("=== Starting Stage: %s ===", s.Name))
+
+	err := fn()
+
+	s.Duration = time.Since(start).Round(time.Millisecond).String()
+	if err != nil {
+		s.Status = StatusFailed
+		d.broadcast(fmt.Sprintf("❌ Error in %s: %v", s.Name, err))
+	} else {
+		s.Status = StatusCompleted
+		d.broadcast(fmt.Sprintf("✅ Completed Stage: %s in %s", s.Name, s.Duration))
 	}
 }
 
-func (d *Deployer) execCmd(stageID, name string, args ...string) error {
+func (d *Deployer) runCmd(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
-	stdout, _ := cmd.StdoutPipe()
-	stderr, _ := cmd.StderrPipe()
+	out, err := cmd.CombinedOutput()
+	d.broadcast(string(out))
+	return err
+}
+
+func (d *Deployer) streamCmdOutput(cmd *exec.Cmd) error {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stderr = cmd.Stdout
 
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 
-	reader := io.MultiReader(stdout, stderr)
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		d.BroadcastLog(stageID, scanner.Text())
+	buf := make([]byte, 1024)
+	for {
+		n, err := stdout.Read(buf)
+		if n > 0 {
+			d.broadcast(string(buf[:n]))
+		}
+		if err != nil {
+			break
+		}
 	}
 
 	return cmd.Wait()
