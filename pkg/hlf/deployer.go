@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os/exec"
 	"sync"
 	"time"
@@ -96,7 +95,7 @@ func (d *Deployer) RunDeployment() {
 		case "stage_1":
 			err = d.execCmd(stage.ID, "bash", "-c", "docker --version && go version")
 		case "stage_2":
-			cmdStr := fmt.Sprintf("curl -sSL [https://bit.ly/2ysbOFE](https://bit.ly/2ysbOFE) | bash -s -- %s 1.5.6 -s -d", d.HLFVersion)
+			cmdStr := fmt.Sprintf("curl -sSL https://bit.ly/2ysbOFE | bash -s -- %s 1.5.6 -s -d", d.HLFVersion)
 			err = d.execCmd(stage.ID, "bash", "-c", cmdStr)
 		case "stage_3":
 			err = d.execCmd(stage.ID, "bash", "-c", "export PATH=$PATH:$(pwd)/fabric-samples/bin && which peer || echo 'Binaries installed successfully'")
