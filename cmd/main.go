@@ -5,22 +5,17 @@ import (
 	"log"
 
 	"hed-core/pkg/dashboard"
-	"hed-core/pkg/plugin"
-	"hed-core/plugins/memory"
-	"hed-core/plugins/yugabyte"
 )
 
 func main() {
-	registry := plugin.NewRegistry()
-	registry.Register(memory.New())
-	registry.Register(yugabyte.New())
-
-	defaultDB, _ := registry.Get("In-Memory RAM (KeyDB)")
-
-	server := dashboard.NewServer(registry, defaultDB)
+	hlfVersion := "2.5.4"
+	server := dashboard.NewHLFServer(hlfVersion)
 
 	fmt.Println("==================================================================")
-	fmt.Println("     HYPERENGINE-DRUNIX (HED): WEB DASHBOARD SERVER               ")
+	fmt.Println("   HYPERLEDGER FABRIC (HLF) DEPLOYMENT PIPELINE & DASHBOARD       ")
+	fmt.Println("==================================================================")
+	fmt.Printf(" [Target HLF Version] : v%s\n", hlfVersion)
+	fmt.Println(" [Dashboard Web URL]  : http://localhost:8080")
 	fmt.Println("==================================================================")
 
 	if err := server.Start(":8080"); err != nil {
