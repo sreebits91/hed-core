@@ -13,6 +13,8 @@ import (
 	"hed-core/pkg/router"
 )
 
+var benchmarkBuffer = router.NewRingBuffer(1 << 16)
+
 type Server struct {
 	hlfServer      *HLFServer
 	deltaEngine    *delta.DeltaEngine
@@ -46,7 +48,7 @@ func NewServer(registry *plugin.Registry, defaultDB plugin.StateEngine, hlfSrv *
 		totalTxs:    100000,
 		batchSize:   500,
 		dbOpsPerTx:  3,
-		isTesting:   true,
+		isTesting:   false,
 	}
 }
 
@@ -76,24 +78,12 @@ func (s *Server) perTickTxCount() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	workers := s.workers
-	if workers <= 0 {
-		workers = 1
-	}
 	batchSize := s.batchSize
 	if batchSize <= 0 {
 		batchSize = 1
 	}
-	dbOps := s.dbOpsPerTx
-	if dbOps <= 0 {
-		dbOps = 1
-	}
 
-	count := uint64((workers * batchSize * dbOps) / 48)
-	if count < 1 {
-		return 1
-	}
-	return count
+	return uint64(batchSize)
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -157,7 +147,7 @@ func (s *Server) handleMetricsStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ticker := time.NewTicker(50 * time.Millisecond)
+	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 
 	s.mu.Lock()
@@ -217,23 +207,40 @@ func (s *Server) handleMetricsStream(w http.ResponseWriter, r *http.Request) {
 					acc := fmt.Sprintf("account_%d", i%1000)
 					ch := routerObj.RouteToShard(acc)
 					channelsToFlush[ch] = struct{}{}
-					channelID := int(i % uint64(curChannels))
-					if s.committer != nil {
-						txStart := time.Now()
-						s.committer.SubmitTx(channelID, acc, []byte("v"))
-						txLatency := time.Since(txStart)
-						s.mu.Lock()
-						s.txLatencyTotal += txLatency
-						s.txLatencyCount++
-						s.mu.Unlock()
-					} else {
-						txStart := time.Now()
-						engine.ApplyDelta(ch, acc, 10)
-						txLatency := time.Since(txStart)
-						s.mu.Lock()
-						s.txLatencyTotal += txLatency
-						s.txLatencyCount++
-						s.mu.Unlock()
+					payload := router.TransactionPayload{
+						TxID:      acc,
+						Namespace: ch,
+						Payload:   []byte("v"),
+						Key:       acc,
+					}
+					_ = benchmarkBuffer.Push(payload)
+					if s.hlfServer != nil && (i%50 == 0 || i == increment-1) {
+						s.hlfServer.addTxLog("TX", fmt.Sprintf("REQ %s payload=v", acc))
+						s.hlfServer.addTxLog("TX", fmt.Sprintf("ACK %s", acc))
+					}
+				}
+
+				batch, err := benchmarkBuffer.PopBatch(increment)
+				if err == nil && len(batch) > 0 {
+					for _, tx := range batch {
+						channelID := int(tx.TxID[len(tx.TxID)-1] % byte(curChannels))
+						if s.committer != nil {
+							txStart := time.Now()
+							s.committer.SubmitTx(channelID, tx.Key, tx.Payload)
+							txLatency := time.Since(txStart)
+							s.mu.Lock()
+							s.txLatencyTotal += txLatency
+							s.txLatencyCount++
+							s.mu.Unlock()
+						} else {
+							txStart := time.Now()
+							engine.ApplyDelta(tx.Namespace, tx.Key, 10)
+							txLatency := time.Since(txStart)
+							s.mu.Lock()
+							s.txLatencyTotal += txLatency
+							s.txLatencyCount++
+							s.mu.Unlock()
+						}
 					}
 				}
 
@@ -384,10 +391,10 @@ const indexHTML = `<!DOCTYPE html>
         <div class="card">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <span class="card-title">Phase 4: Benchmarking</span>
-                <span id="badge-test" class="badge badge-pending">STANDBY</span>
+                <span id="badge-test" class="badge badge-pending">OFF</span>
             </div>
-            <div class="card-subtext" style="margin-top:10px;">Status: Ready for stress test</div>
-            <button id="btn-test" class="btn btn-success" onclick="toggleTest()" disabled>▶ Run Real-Time TPS Test</button>
+            <div class="card-subtext" style="margin-top:10px;">Status: Tracking is paused until you start it</div>
+            <button id="btn-test" class="btn btn-success" onclick="toggleTest()" disabled>▶ Start Tracking</button>
         </div>
     </div>
 
@@ -514,8 +521,8 @@ const indexHTML = `<!DOCTYPE html>
                 <input type="number" id="modal-orgs" value="2" min="1" max="8">
             </div>
             <div style="margin-bottom:18px;">
-                <label>Primary Channel Name</label>
-                <input type="text" id="modal-channel" value="mychannel">
+                <label>Channel Names (comma separated)</label>
+                <input type="text" id="modal-channel" value="mychannel,anotherchannel">
             </div>
             <div style="display:flex; gap:10px;">
                 <button class="btn btn-success" onclick="confirmInstallation()">OK / Provision</button>
@@ -612,11 +619,12 @@ const indexHTML = `<!DOCTYPE html>
             const peerCount = parseInt(document.getElementById('modal-peers').value);
             const orgCount = parseInt(document.getElementById('modal-orgs').value);
             const channelName = document.getElementById('modal-channel').value;
+            const channels = channelName;
 
             await fetch('/api/hlf/install', { 
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ peerCount, orgCount, channelName })
+                body: JSON.stringify({ peerCount, orgCount, channelName, channels })
             });
 
             isInstalled = true;
@@ -646,14 +654,14 @@ const indexHTML = `<!DOCTYPE html>
             const badge = document.getElementById('badge-test');
 
             if (isTesting) {
-                btn.innerText = "⏸ Pause TPS Test";
+                btn.innerText = "⏸ Stop Tracking";
                 btn.className = "btn btn-danger";
                 badge.innerText = "RUNNING";
                 badge.className = "badge badge-active";
             } else {
-                btn.innerText = "▶ Run Real-Time TPS Test";
+                btn.innerText = "▶ Start Tracking";
                 btn.className = "btn btn-success";
-                badge.innerText = "PAUSED";
+                badge.innerText = "OFF";
                 badge.className = "badge badge-pending";
             }
             applyConfig();
@@ -717,6 +725,8 @@ const indexHTML = `<!DOCTYPE html>
                 if (!res.ok) return;
                 const data = await res.json();
                 const nodeLogsBox = document.getElementById('nodeLogsBox');
+                const txLogsBox = document.getElementById('txLogsBox');
+
                 if (nodeLogsBox && data.logs && data.logs.length > 0) {
                     nodeLogsBox.innerHTML = data.logs.map(log => 
                         '<div class="log-entry" style="color:#94a3b8;">' +
@@ -724,6 +734,22 @@ const indexHTML = `<!DOCTYPE html>
                             '<span style="color:#38bdf8;">[' + log.node + ']</span> ' + log.message +
                         '</div>'
                     ).join('');
+                } else if (nodeLogsBox) {
+                    nodeLogsBox.innerHTML = '<div style="color:#94a3b8;">[SYSTEM] Awaiting HLF installation trigger...</div>';
+                }
+
+                if (txLogsBox) {
+                    const txLogs = Array.isArray(data.txLogs) ? data.txLogs : [];
+                    if (txLogs.length > 0) {
+                        txLogsBox.innerHTML = txLogs.map(log => 
+                            '<div class="log-entry" style="color:#cbd5e1;">' +
+                                '<span style="color:#f59e0b;">[' + log.timestamp + ']</span> ' +
+                                '<span style="color:#4ade80;">[' + log.node + ']</span> ' + log.message +
+                            '</div>'
+                        ).join('');
+                    } else {
+                        txLogsBox.innerHTML = '<div style="color:#94a3b8;">Awaiting test start...</div>';
+                    }
                 }
             } catch (err) {}
         }

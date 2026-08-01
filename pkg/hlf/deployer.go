@@ -145,10 +145,22 @@ func (d *Deployer) RunDeployment() {
 
 	// Stage 4: Create channel and join peers
 	d.executeStage(3, func() error {
-		cmd := exec.Command("./network.sh", "createChannel", "-c", d.opts.ChannelID)
-		cmd.Dir = TestNetworkDir
-		cmd.Env = envVars
-		return d.streamCmdOutput(cmd)
+		channels := d.opts.Channels
+		if len(channels) == 0 && d.opts.ChannelID != "" {
+			channels = []string{d.opts.ChannelID}
+		}
+		if len(channels) == 0 {
+			channels = []string{DefaultChannelID}
+		}
+		for _, channelID := range channels {
+			cmd := exec.Command("./network.sh", "createChannel", "-c", channelID)
+			cmd.Dir = TestNetworkDir
+			cmd.Env = envVars
+			if err := d.streamCmdOutput(cmd); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 
 	// Stage 5: Deploy Chaincode (Self-Healing go.mod & Vendoring)
@@ -180,15 +192,27 @@ func (d *Deployer) RunDeployment() {
 		}
 
 		// 3. Chaincode lifecycle commit
-		cmd := exec.Command("./network.sh", "deployCC",
-			"-c", d.opts.ChannelID,
-			"-ccn", d.opts.ChaincodeName,
-			"-ccp", DefaultChaincodePath,
-			"-ccl", DefaultChaincodeLang,
-		)
-		cmd.Dir = TestNetworkDir
-		cmd.Env = envVars
-		return d.streamCmdOutput(cmd)
+		channels := d.opts.Channels
+		if len(channels) == 0 && d.opts.ChannelID != "" {
+			channels = []string{d.opts.ChannelID}
+		}
+		if len(channels) == 0 {
+			channels = []string{DefaultChannelID}
+		}
+		for _, channelID := range channels {
+			cmd := exec.Command("./network.sh", "deployCC",
+				"-c", channelID,
+				"-ccn", d.opts.ChaincodeName,
+				"-ccp", DefaultChaincodePath,
+				"-ccl", DefaultChaincodeLang,
+			)
+			cmd.Dir = TestNetworkDir
+			cmd.Env = envVars
+			if err := d.streamCmdOutput(cmd); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,11 +32,13 @@ type HLFServer struct {
 	peerCount       int
 	orgCount        int
 	channelName     string
+	channels        []string
 	contractVersion string
 	lastInstalledAt string
 	installed       bool
 	phases          []PhaseStatus
 	logs            []map[string]string
+	txLogs          []map[string]string
 	deployer        *hlf.Deployer
 }
 
@@ -45,6 +48,7 @@ func NewHLFServer(net *hlf.Network) *HLFServer {
 		peerCount:       4,
 		orgCount:        2,
 		channelName:     hlf.DefaultChannelID,
+		channels:        []string{hlf.DefaultChannelID},
 		contractVersion: "hed-cc v1.0",
 		lastInstalledAt: "",
 		installed:       false,
@@ -90,8 +94,12 @@ func (s *HLFServer) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	channels := []string{}
-	if s.installed && s.channelName != "" {
-		channels = append(channels, s.channelName)
+	if s.installed {
+		if len(s.channels) > 0 {
+			channels = append(channels, s.channels...)
+		} else if s.channelName != "" {
+			channels = append(channels, s.channelName)
+		}
 	}
 
 	resp := map[string]interface{}{
@@ -120,6 +128,7 @@ func (s *HLFServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		PeerCount   int    `json:"peerCount"`
 		OrgCount    int    `json:"orgCount"`
 		ChannelName string `json:"channelName"`
+		Channels    string `json:"channels"`
 	}
 
 	if r != nil {
@@ -131,7 +140,7 @@ func (s *HLFServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.applyInstall(req.PeerCount, req.OrgCount, req.ChannelName)
+	s.applyInstall(req.PeerCount, req.OrgCount, req.ChannelName, req.Channels)
 
 	if w != nil {
 		w.WriteHeader(http.StatusOK)
@@ -148,7 +157,7 @@ func (s *HLFServer) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *HLFServer) applyInstall(peerCount, orgCount int, channelName string) {
+func (s *HLFServer) applyInstall(peerCount, orgCount int, channelName, channels string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -161,6 +170,23 @@ func (s *HLFServer) applyInstall(peerCount, orgCount int, channelName string) {
 	if channelName != "" {
 		s.channelName = channelName
 	}
+	if channels != "" {
+		parts := []string{}
+		for _, part := range strings.Split(channels, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" {
+				parts = append(parts, trimmed)
+			}
+		}
+		if len(parts) > 0 {
+			s.channels = parts
+			if s.channelName == "" || s.channelName == hlf.DefaultChannelID {
+				s.channelName = parts[0]
+			}
+		}
+	} else if len(s.channels) == 0 && channelName != "" {
+		s.channels = []string{channelName}
+	}
 	s.installed = true
 	s.lastInstalledAt = time.Now().Format("15:04:05 MST")
 
@@ -171,7 +197,11 @@ func (s *HLFServer) applyInstall(peerCount, orgCount int, channelName string) {
 	}
 
 	s.addLog("SYSTEM", "Provisioning HLF cluster with "+string(rune('0'+s.peerCount))+" peers across "+string(rune('0'+s.orgCount))+" orgs")
-	s.addLog("DOCKER", "Network test-network initialized on channel '"+s.channelName+"'")
+	if len(s.channels) > 0 {
+		s.addLog("DOCKER", "Network test-network initialized on channels '"+strings.Join(s.channels, ", ")+"'")
+	} else {
+		s.addLog("DOCKER", "Network test-network initialized on channel '"+s.channelName+"'")
+	}
 }
 
 func (s *HLFServer) applyDeploy() {
@@ -183,13 +213,17 @@ func (s *HLFServer) applyDeploy() {
 	}
 	s.contractVersion = "hed-cc v1.1 (Deployed)"
 	s.installed = true
-	s.addLog("CHAINCODE", "Package hed-cc.tar.gz installed and committed to channel '"+s.channelName+"'")
+	if len(s.channels) > 0 {
+		s.addLog("CHAINCODE", "Package hed-cc.tar.gz installed and committed to channels '"+strings.Join(s.channels, ", ")+"'")
+	} else {
+		s.addLog("CHAINCODE", "Package hed-cc.tar.gz installed and committed to channel '"+s.channelName+"'")
+	}
 }
 
 func (s *HLFServer) BeginLifecycleSimulation() {
 	go func() {
 		s.addLog("SYSTEM", "Starting Fabric deployment pipeline")
-		s.applyInstall(4, 2, s.channelName)
+		s.applyInstall(4, 2, s.channelName, strings.Join(s.channels, ","))
 		s.addLog("SYSTEM", fmt.Sprintf("Launching Fabric deployer for channel %s", s.channelName))
 		if s.deployer != nil {
 			go s.deployer.RunDeployment()
@@ -216,7 +250,8 @@ func (s *HLFServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"logs": s.logs,
+		"logs":   s.logs,
+		"txLogs": s.txLogs,
 	})
 }
 
@@ -229,5 +264,17 @@ func (s *HLFServer) addLog(node, msg string) {
 	s.logs = append([]map[string]string{entry}, s.logs...)
 	if len(s.logs) > 50 {
 		s.logs = s.logs[:50]
+	}
+}
+
+func (s *HLFServer) addTxLog(node, msg string) {
+	entry := map[string]string{
+		"timestamp": time.Now().Format("15:04:05"),
+		"node":      node,
+		"message":   msg,
+	}
+	s.txLogs = append([]map[string]string{entry}, s.txLogs...)
+	if len(s.txLogs) > 50 {
+		s.txLogs = s.txLogs[:50]
 	}
 }

@@ -22,16 +22,18 @@ const (
 
 // DeployOptions holds customizable pipeline settings passed from UI or default constants
 type DeployOptions struct {
-	FabricVersion string `json:"fabricVersion"`
-	ChannelID     string `json:"channelId"`
-	ChaincodeName string `json:"chaincodeName"`
-	TargetGoVer   string `json:"targetGoVer"`
+	FabricVersion string   `json:"fabricVersion"`
+	ChannelID     string   `json:"channelId"`
+	Channels      []string `json:"channels"`
+	ChaincodeName string   `json:"chaincodeName"`
+	TargetGoVer   string   `json:"targetGoVer"`
 }
 
 func DefaultOptions() DeployOptions {
 	return DeployOptions{
 		FabricVersion: DefaultFabricVersion,
 		ChannelID:     DefaultChannelID,
+		Channels:      []string{DefaultChannelID},
 		ChaincodeName: DefaultChaincodeName,
 		TargetGoVer:   TargetGoVersion,
 	}
