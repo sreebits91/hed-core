@@ -1,5 +1,5 @@
 # hed-core
-High-performance, modular extension layer for NPCI Drunix scaling DLT workloads up to 400,000+ TPS using dynamic sharding, lock-free Delta-CRDT, and pluggable storage engines.
+High-performance, modular extension layer for NPCI Drunix scaling DLT workloads up to 100,000+ TPS using dynamic sharding, lock-free Delta-CRDT, and pluggable storage engines.
 
 [User Clicks "Start Installation"]
               │
@@ -43,7 +43,7 @@ go run cmd/main.go
                                 │ (WebSocket / Trace Channel)│
                                 └───────────────────────────┘
 
-┌──────────────────────────────────────────────┐
+                      ┌──────────────────────────────────────────────┐
                       │    HyperEngine Worker Pool (128 Workers)     │
                       └──────────────────────┬───────────────────────┘
                                              │
