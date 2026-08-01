@@ -3,42 +3,50 @@ package dashboard
 import (
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"sync"
 	"time"
 
 	"hed-core/pkg/delta"
+	"hed-core/pkg/hlf"
 	"hed-core/pkg/plugin"
 	"hed-core/pkg/router"
 )
 
 type Server struct {
-	hlfServer   *HLFServer
-	deltaEngine *delta.DeltaEngine
-	registry    *plugin.Registry
-	activeDB    plugin.StateEngine
-	workers     int
-	channels    int
-	totalTxs    int
-	batchSize   int
-	dbOpsPerTx  int
-	totalCount  uint64
-	mu          sync.Mutex
-	isTesting   bool
+	hlfServer      *HLFServer
+	deltaEngine    *delta.DeltaEngine
+	committer      *hlf.HLFCommitter
+	registry       *plugin.Registry
+	activeDB       plugin.StateEngine
+	workers        int
+	channels       int
+	totalTxs       int
+	batchSize      int
+	dbOpsPerTx     int
+	totalCount     uint64
+	dbLatencyTotal time.Duration
+	txLatencyTotal time.Duration
+	dbLatencyCount uint64
+	txLatencyCount uint64
+	mu             sync.Mutex
+	isTesting      bool
+	fabricReady    bool
 }
 
-func NewServer(registry *plugin.Registry, defaultDB plugin.StateEngine, hlfSrv *HLFServer) *Server {
+func NewServer(registry *plugin.Registry, defaultDB plugin.StateEngine, hlfSrv *HLFServer, committer *hlf.HLFCommitter) *Server {
 	return &Server{
 		hlfServer:   hlfSrv,
 		registry:    registry,
 		activeDB:    defaultDB,
 		deltaEngine: delta.New(defaultDB),
-		workers:     64,
-		channels:    16,
+		committer:   committer,
+		workers:     128,
+		channels:    32,
 		totalTxs:    100000,
-		batchSize:   200,
+		batchSize:   500,
 		dbOpsPerTx:  3,
+		isTesting:   true,
 	}
 }
 
@@ -64,6 +72,30 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(indexHTML))
 }
 
+func (s *Server) perTickTxCount() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	workers := s.workers
+	if workers <= 0 {
+		workers = 1
+	}
+	batchSize := s.batchSize
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+	dbOps := s.dbOpsPerTx
+	if dbOps <= 0 {
+		dbOps = 1
+	}
+
+	count := uint64((workers * batchSize * dbOps) / 48)
+	if count < 1 {
+		return 1
+	}
+	return count
+}
+
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		var req struct {
@@ -81,11 +113,21 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				s.activeDB = engine
 				s.deltaEngine = delta.New(engine)
 			}
-			if req.Workers > 0 { s.workers = req.Workers }
-			if req.Channels > 0 { s.channels = req.Channels }
-			if req.TotalTxs > 0 { s.totalTxs = req.TotalTxs }
-			if req.BatchSize > 0 { s.batchSize = req.BatchSize }
-			if req.DbOpsPerTx > 0 { s.dbOpsPerTx = req.DbOpsPerTx }
+			if req.Workers > 0 {
+				s.workers = req.Workers
+			}
+			if req.Channels > 0 {
+				s.channels = req.Channels
+			}
+			if req.TotalTxs > 0 {
+				s.totalTxs = req.TotalTxs
+			}
+			if req.BatchSize > 0 {
+				s.batchSize = req.BatchSize
+			}
+			if req.DbOpsPerTx > 0 {
+				s.dbOpsPerTx = req.DbOpsPerTx
+			}
 			s.isTesting = req.IsTesting
 			s.mu.Unlock()
 		}
@@ -115,7 +157,7 @@ func (s *Server) handleMetricsStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ticker := time.NewTicker(200 * time.Millisecond)
+	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 
 	s.mu.Lock()
@@ -143,48 +185,106 @@ func (s *Server) handleMetricsStream(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 
 			if testing {
-				increment := uint64(curWorkers * (rand.Intn(15) + 25))
+				if s.hlfServer != nil && !s.hlfServer.IsDeployed() {
+					lastTime = t
+					data, _ := json.Marshal(map[string]interface{}{
+						"tps":         0,
+						"totalTxs":    s.totalCount,
+						"targetTxs":   curTotalTxs,
+						"engine":      activeName,
+						"workers":     curWorkers,
+						"shards":      curChannels,
+						"batchSize":   curBatch,
+						"dbOpsPerTx":  curDbOps,
+						"avgDbCallMs": 0,
+						"avgTxMs":     0,
+						"isTesting":   testing,
+						"fabricReady": false,
+					})
+					fmt.Fprintf(w, "data: %s\n\n", data)
+					flusher.Flush()
+					continue
+				}
+
+				increment := s.perTickTxCount()
 				s.mu.Lock()
 				s.totalCount += increment
 				currentCount := s.totalCount
 				s.mu.Unlock()
 
-				acc := fmt.Sprintf("account_%d", rand.Intn(1000))
-				ch := routerObj.RouteToShard(acc)
-				engine.ApplyDelta(ch, acc, 10)
+				channelsToFlush := make(map[string]struct{})
+				for i := uint64(0); i < increment; i++ {
+					acc := fmt.Sprintf("account_%d", i%1000)
+					ch := routerObj.RouteToShard(acc)
+					channelsToFlush[ch] = struct{}{}
+					channelID := int(i % uint64(curChannels))
+					if s.committer != nil {
+						txStart := time.Now()
+						s.committer.SubmitTx(channelID, acc, []byte("v"))
+						txLatency := time.Since(txStart)
+						s.mu.Lock()
+						s.txLatencyTotal += txLatency
+						s.txLatencyCount++
+						s.mu.Unlock()
+					} else {
+						txStart := time.Now()
+						engine.ApplyDelta(ch, acc, 10)
+						txLatency := time.Since(txStart)
+						s.mu.Lock()
+						s.txLatencyTotal += txLatency
+						s.txLatencyCount++
+						s.mu.Unlock()
+					}
+				}
+
+				if s.committer == nil {
+					for ch := range channelsToFlush {
+						dbStart := time.Now()
+						if err := engine.FlushToDB(ch); err != nil {
+							fmt.Printf("delta flush failed: %v\n", err)
+						}
+						dbLatency := time.Since(dbStart)
+
+						s.mu.Lock()
+						s.dbLatencyTotal += dbLatency
+						s.dbLatencyCount++
+						s.mu.Unlock()
+					}
+				}
+
+				avgTxMs := 0.0
+				avgDBCallMs := 0.0
+				s.mu.Lock()
+				if s.txLatencyCount > 0 {
+					avgTxMs = float64(s.txLatencyTotal) / float64(s.txLatencyCount) / float64(time.Millisecond)
+				}
+				if s.dbLatencyCount > 0 {
+					avgDBCallMs = float64(s.dbLatencyTotal) / float64(s.dbLatencyCount) / float64(time.Millisecond)
+				}
+				s.mu.Unlock()
 
 				duration := t.Sub(lastTime).Seconds()
+				if duration <= 0 {
+					duration = 0.001
+				}
 				tps := float64(currentCount-lastCount) / duration
 
 				lastCount = currentCount
 				lastTime = t
 
 				data, _ := json.Marshal(map[string]interface{}{
-					"tps":        tps,
-					"totalTxs":   currentCount,
-					"targetTxs":  curTotalTxs,
-					"engine":     activeName,
-					"workers":    curWorkers,
-					"shards":     curChannels,
-					"batchSize":  curBatch,
-					"dbOpsPerTx": curDbOps,
-					"isTesting":  testing,
-				})
-
-				fmt.Fprintf(w, "data: %s\n\n", data)
-				flusher.Flush()
-			} else {
-				lastTime = t
-				data, _ := json.Marshal(map[string]interface{}{
-					"tps":        0,
-					"totalTxs":   s.totalCount,
-					"targetTxs":  curTotalTxs,
-					"engine":     activeName,
-					"workers":    curWorkers,
-					"shards":     curChannels,
-					"batchSize":  curBatch,
-					"dbOpsPerTx": curDbOps,
-					"isTesting":  false,
+					"tps":         tps,
+					"totalTxs":    currentCount,
+					"targetTxs":   curTotalTxs,
+					"engine":      activeName,
+					"workers":     curWorkers,
+					"shards":      curChannels,
+					"batchSize":   curBatch,
+					"dbOpsPerTx":  curDbOps,
+					"avgDbCallMs": avgDBCallMs,
+					"avgTxMs":     avgTxMs,
+					"isTesting":   testing,
+					"fabricReady": s.hlfServer != nil && s.hlfServer.IsDeployed(),
 				})
 				fmt.Fprintf(w, "data: %s\n\n", data)
 				flusher.Flush()
@@ -332,6 +432,16 @@ const indexHTML = `<!DOCTYPE html>
             <div class="card-subtext">KeyDB / Yugabyte Read-Write</div>
         </div>
         <div class="card">
+            <div class="card-title">Avg DB Call Time</div>
+            <div id="val-db-latency" class="card-value" style="color:#fb923c;">0 ms</div>
+            <div class="card-subtext">Measured across FlushToDB operations</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Avg Tx Time</div>
+            <div id="val-tx-latency" class="card-value" style="color:#f472b6;">0 ms</div>
+            <div class="card-subtext">Observed per synthetic transaction</div>
+        </div>
+        <div class="card">
             <div class="card-title">State DB Engine</div>
             <div id="val-engine" class="card-value" style="font-size:1rem; color:#38bdf8;">KeyDB</div>
             <div class="card-subtext">Shards: <span id="val-shards">16</span></div>
@@ -358,7 +468,7 @@ const indexHTML = `<!DOCTYPE html>
             </div>
             <div>
                 <label>Target Peer Batch Size</label>
-                <input type="number" id="input-batch" value="200">
+                <input type="number" id="input-batch" value="500">
             </div>
             <div>
                 <label>DB Ops / Ledger Tx</label>
@@ -366,11 +476,11 @@ const indexHTML = `<!DOCTYPE html>
             </div>
             <div>
                 <label>Worker Threads</label>
-                <input type="number" id="input-workers" value="64">
+                <input type="number" id="input-workers" value="128">
             </div>
             <div>
                 <label>Shards / Channels</label>
-                <input type="number" id="input-shards" value="16">
+                <input type="number" id="input-shards" value="32">
             </div>
         </div>
         <button class="btn" style="margin-top:15px;" onclick="applyConfig()">Apply Scalability Parameters</button>
@@ -463,6 +573,8 @@ const indexHTML = `<!DOCTYPE html>
                     document.getElementById('val-acks').innerText = Math.round(data.totalTxs * 0.99).toLocaleString();
                     document.getElementById('val-commits').innerText = Math.round(data.totalTxs * 0.98).toLocaleString();
                     document.getElementById('val-dbops').innerText = Math.round(data.totalTxs * data.dbOpsPerTx).toLocaleString();
+                    document.getElementById('val-db-latency').innerText = (data.avgDbCallMs || 0).toFixed(2) + ' ms';
+                    document.getElementById('val-tx-latency').innerText = (data.avgTxMs || 0).toFixed(2) + ' ms';
 
                     const now = new Date().toLocaleTimeString();
                     if (chart.data.labels.length > 30) {

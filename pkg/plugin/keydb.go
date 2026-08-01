@@ -2,20 +2,38 @@ package plugin
 
 import (
 	"fmt"
+	"hash/fnv"
 	"sync"
 )
 
-type KeyDBEngine struct {
-	name  string
-	store map[string]map[string][]byte
+const ShardCount = 32
+
+type DBShard struct {
 	mu    sync.RWMutex
+	store map[string]map[string][]byte
+}
+
+type KeyDBEngine struct {
+	name   string
+	shards [ShardCount]*DBShard
 }
 
 func NewKeyDBEngine() *KeyDBEngine {
-	return &KeyDBEngine{
-		name:  "KeyDB",
-		store: make(map[string]map[string][]byte),
+	engine := &KeyDBEngine{
+		name: "KeyDB",
 	}
+	for i := 0; i < ShardCount; i++ {
+		engine.shards[i] = &DBShard{
+			store: make(map[string]map[string][]byte),
+		}
+	}
+	return engine
+}
+
+func (k *KeyDBEngine) getShard(namespace string) *DBShard {
+	h := fnv.New32a()
+	h.Write([]byte(namespace))
+	return k.shards[h.Sum32()%ShardCount]
 }
 
 func (k *KeyDBEngine) Name() string {
@@ -23,19 +41,16 @@ func (k *KeyDBEngine) Name() string {
 }
 
 func (k *KeyDBEngine) Init(config map[string]string) error {
+	_ = config
 	return nil
 }
 
-func (k *KeyDBEngine) GetState(channelID, key string) ([]byte, error) {
-	k.mu.RLock()
-	defer k.mu.RUnlock()
+func (k *KeyDBEngine) GetState(channelID string, key string) ([]byte, error) {
+	shard := k.getShard(channelID)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
 
-	namespace := channelID
-	if namespace == "" {
-		namespace = "default"
-	}
-
-	if ns, ok := k.store[namespace]; ok {
+	if ns, ok := shard.store[channelID]; ok {
 		if val, exists := ns[key]; exists {
 			return val, nil
 		}
@@ -43,57 +58,80 @@ func (k *KeyDBEngine) GetState(channelID, key string) ([]byte, error) {
 	return nil, fmt.Errorf("key %s not found", key)
 }
 
-func (k *KeyDBEngine) PutState(channelID, key string, val []byte) error {
-	k.mu.Lock()
-	defer k.mu.Unlock()
+func (k *KeyDBEngine) PutState(channelID string, key string, value []byte) error {
+	shard := k.getShard(channelID)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	namespace := channelID
-	if namespace == "" {
-		namespace = "default"
+	if _, exists := shard.store[channelID]; !exists {
+		shard.store[channelID] = make(map[string][]byte)
 	}
-	if _, exists := k.store[namespace]; !exists {
-		k.store[namespace] = make(map[string][]byte)
-	}
-	k.store[namespace][key] = val
+	shard.store[channelID][key] = value
 	return nil
 }
 
 func (k *KeyDBEngine) Get(key string) ([]byte, error) {
-	return k.GetState("default", key)
+	shard := k.shards[0] // Default shard
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+
+	if ns, ok := shard.store["default"]; ok {
+		if val, exists := ns[key]; exists {
+			return val, nil
+		}
+	}
+	return nil, fmt.Errorf("key %s not found", key)
 }
 
 func (k *KeyDBEngine) Put(key string, val []byte) error {
-	return k.PutState("default", key, val)
+	shard := k.shards[0]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	if _, exists := shard.store["default"]; !exists {
+		shard.store["default"] = make(map[string][]byte)
+	}
+	shard.store["default"][key] = val
+	return nil
 }
 
 func (k *KeyDBEngine) Delete(key string) error {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if ns, ok := k.store["default"]; ok {
+	shard := k.shards[0]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	if ns, ok := shard.store["default"]; ok {
 		delete(ns, key)
 	}
 	return nil
 }
 
-// BatchWrite handles namespaced batch operations matching plugin.StateEngine.
 func (k *KeyDBEngine) BatchWrite(namespace string, batch map[string][]byte) error {
-	k.mu.Lock()
-	defer k.mu.Unlock()
+	shard := k.getShard(namespace)
 
-	if _, exists := k.store[namespace]; !exists {
-		k.store[namespace] = make(map[string][]byte)
+	shard.mu.Lock()
+	if _, exists := shard.store[namespace]; !exists {
+		shard.store[namespace] = make(map[string][]byte, len(batch))
 	}
 
+	ns := shard.store[namespace]
 	for key, val := range batch {
 		if val == nil {
-			delete(k.store[namespace], key)
+			delete(ns, key)
 		} else {
-			k.store[namespace][key] = val
+			ns[key] = val
 		}
 	}
+	shard.mu.Unlock()
 	return nil
 }
 
+// Close satisfies the plugin.StateEngine interface requirements
 func (k *KeyDBEngine) Close() error {
+	for i := 0; i < ShardCount; i++ {
+		k.shards[i].mu.Lock()
+		k.shards[i].store = nil
+		k.shards[i].mu.Unlock()
+	}
 	return nil
 }

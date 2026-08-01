@@ -1,5 +1,6 @@
 # hed-core
-High-performance, modular extension layer for NPCI Drunix scaling DLT workloads up to 100,000+ TPS using dynamic sharding, lock-free Delta-CRDT, and pluggable storage engines.
+
+hed-core is a benchmark-oriented Hyperledger Fabric control plane for exercising a high-throughput transaction pipeline locally. It combines a dashboard, a sharded committer path, and a Fabric lifecycle bootstrap flow so the UI can surface readiness and throughput while the benchmark is running.
 
 [User Clicks "Start Installation"]
               │

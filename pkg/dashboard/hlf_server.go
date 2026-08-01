@@ -108,7 +108,7 @@ func (s *HLFServer) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *HLFServer) handleInstall(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if r != nil && r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -119,46 +119,89 @@ func (s *HLFServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		ChannelName string `json:"channelName"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
-		s.mu.Lock()
-		if req.PeerCount > 0 {
-			s.peerCount = req.PeerCount
-		}
-		if req.OrgCount > 0 {
-			s.orgCount = req.OrgCount
-		}
-		if req.ChannelName != "" {
-			s.channelName = req.ChannelName
-		}
-		s.installed = true
-		s.lastInstalledAt = time.Now().Format("15:04:05 MST")
-
-		for i := range s.phases {
-			if i < 4 {
-				s.phases[i].Status = "COMPLETED"
+	if r != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if w != nil {
+				w.WriteHeader(http.StatusBadRequest)
 			}
+			return
 		}
-
-		s.addLog("SYSTEM", "Provisioning HLF cluster with "+string(rune('0'+s.peerCount))+" peers across "+string(rune('0'+s.orgCount))+" orgs")
-		s.addLog("DOCKER", "Network test-network initialized on channel '"+s.channelName+"'")
-		s.mu.Unlock()
 	}
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	s.applyInstall(req.PeerCount, req.OrgCount, req.ChannelName)
+
+	if w != nil {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}
 }
 
 func (s *HLFServer) handleDeploy(w http.ResponseWriter, r *http.Request) {
+	s.applyDeploy()
+
+	if w != nil {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}
+}
+
+func (s *HLFServer) applyInstall(peerCount, orgCount int, channelName string) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if peerCount > 0 {
+		s.peerCount = peerCount
+	}
+	if orgCount > 0 {
+		s.orgCount = orgCount
+	}
+	if channelName != "" {
+		s.channelName = channelName
+	}
+	s.installed = true
+	s.lastInstalledAt = time.Now().Format("15:04:05 MST")
+
+	for i := range s.phases {
+		if i < 4 {
+			s.phases[i].Status = "COMPLETED"
+		}
+	}
+
+	s.addLog("SYSTEM", "Provisioning HLF cluster with "+string(rune('0'+s.peerCount))+" peers across "+string(rune('0'+s.orgCount))+" orgs")
+	s.addLog("DOCKER", "Network test-network initialized on channel '"+s.channelName+"'")
+}
+
+func (s *HLFServer) applyDeploy() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if len(s.phases) >= 5 {
 		s.phases[4].Status = "COMPLETED"
 	}
 	s.contractVersion = "hed-cc v1.1 (Deployed)"
+	s.installed = true
 	s.addLog("CHAINCODE", "Package hed-cc.tar.gz installed and committed to channel '"+s.channelName+"'")
-	s.mu.Unlock()
+}
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+func (s *HLFServer) BeginLifecycleSimulation() {
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		s.applyInstall(4, 2, "mychannel")
+		time.Sleep(250 * time.Millisecond)
+		s.applyDeploy()
+	}()
+}
+
+func (s *HLFServer) IsInstalled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.installed
+}
+
+func (s *HLFServer) IsDeployed() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.installed && s.contractVersion != "hed-cc v1.0"
 }
 
 func (s *HLFServer) handleLogs(w http.ResponseWriter, r *http.Request) {
