@@ -2,104 +2,57 @@
 
 hed-core is a benchmark-oriented Hyperledger Fabric control plane for exercising a high-throughput transaction pipeline locally. It combines a dashboard, a sharded committer path, and a Fabric lifecycle bootstrap flow so the UI can surface readiness and throughput while the benchmark is running.
 
-[User Clicks "Start Installation"]
-              │
-              ▼
-JavaScript JSON POST payload ───► /api/deploy/start
-                                         │
-                                         ▼
-                             Decodes `hlf.DeployOptions`
-                                         │
-                                         ▼
-                            `go deployer.RunDeployment()`
-                                         │
-              ┌──────────────────────────┴──────────────────────────┐
-              ▼                                                     ▼
-   Background Execution                               Live SSE Stream (/api/deploy/stream)
-(Stage 1..5 runs in terminal)                     (Broadcasting live terminal logs to UI)
+## What it does
 
-curl -sSL https://bit.ly/2ysbOFE | bash -s -- 2.5.4 1.5.6
+- Starts a local web dashboard on port 8080.
+- Exposes live metrics over Server-Sent Events at /api/metrics.
+- Uses a sharded in-memory KeyDB engine plus a parallel committer path for benchmark traffic.
+- Boots a Fabric deployment lifecycle through the existing Fabric deployer implementation.
+- Marks the benchmark as Fabric-ready once the deploy flow has been triggered.
 
-go run cmd/main.go
+## Run locally
 
-[ Client Request ] ──► [ Async HTTP Handler ] ──( 1. Immediate ACK )──► [ Client (202 Accepted) ]
-                             │
-                      ( 2. Push to Queue )
-                             ▼
-                    [ Lock-Free Ring Buffer ]
-                             │
-                      ( 3. Batch Pull )
-                             ▼
-                    [ 128 Worker Pool ] ──► [ In-Memory RAM Engine ]
+```bash
+go run ./cmd/main.go
+```
 
+Then open:
 
-┌────────────────────────┐      ┌───────────────────────────┐      ┌─────────────────────────┐
-│ Async Ingestion Engine │ ───> │ Ring Buffer / Worker Pool │ ───> │ State Engine Storage    │
-│ (HTTP 202 Immediate)   │      │ (128 Workers / 32 Chans)  │      │ (RAM / YugabyteDB)      │
-└───────────┬────────────┘      └─────────────┬─────────────┘      └─────────────────────────┘
-            │                                 │
-            │                                 ▼
-            │                   ┌───────────────────────────┐
-            └─────────────────> │ Async Ack Callback Engine │
-                                │ (WebSocket / Trace Channel)│
-                                └───────────────────────────┘
+- http://localhost:8080/
+- http://localhost:8080/api/metrics
+- http://localhost:8080/api/hlf/telemetry
 
-                      ┌──────────────────────────────────────────────┐
-                      │    HyperEngine Worker Pool (128 Workers)     │
-                      └──────────────────────┬───────────────────────┘
-                                             │
-            ┌────────────────────────────────┼────────────────────────────────┐
-            ▼                                ▼                                ▼
-┌──────────────────────┐        ┌──────────────────────┐        ┌──────────────────────┐
-│  Channel Array [0..9]│        │ Channel Array [10..21]│       │Channel Array [22..31]│
-└───────────┬──────────┘        └───────────┬──────────┘        └───────────┬──────────┘
-            │                               │                               │
-            ▼                               ▼                               ▼
-┌──────────────────────────────────────────────────────────────────────────────────────┐
-│                            Lockless LMAX Disruptor Ring Buffer                       │
-└──────────────────────────────────────────────────────────────────────────────────────┘
+## Key components
 
+- cmd/main.go: application entrypoint.
+- pkg/dashboard/server.go: metrics dashboard and benchmark loop.
+- pkg/dashboard/hlf_server.go: Fabric lifecycle state and readiness flags.
+- pkg/hlf/deployer.go: Fabric bootstrap/deployment workflow.
+- pkg/hlf/committer.go: high-throughput transaction submitter.
 
-Client / Studio           HyperEngine API               Go Smart Contract          Fabric Peer / Orderer
-       │                         │                               │                         │
-       │── 1. Async Submit ────>│                               │                         │
-       │   (Tx Payload + UUID)   │                               │                         │
-       │<── 2. Immediate Ack ────│                               │                         │
-       │    (HTTP 202 Accepted)  │                               │                         │
-       │                         │── 3. Batch Submit (Channel) ─>│                         │
-       │                         │                               │── 4. Parallel Exec ───>│
-       │                         │                               │    (Optimistic Read)    │
-       │<── 5. Async Event Stream│                               │                         │
-       │    (WebSocket/gRPC)     │<── 6. Tx Committed Context ────│<── 5. Block Commit ─────│
-Key Changes
+## Current benchmark behavior
 
+The dashboard emits live metrics including:
 
+- TPS
+- total transactions
+- average DB call latency
+- average transaction latency
+- worker/channel configuration
+- Fabric readiness state
 
+The benchmark remains a local benchmark harness, but it now uses the Fabric deployment lifecycle as its readiness gate.
 
-Client / API Endpoint
-          │
-          │ 1. POST /api/v1/transact (Payload)
-          ▼
-┌────────────────────────────────────────────────────────┐
-│  Ingress API Handler (Zero Allocation)                 │
-│  - Generates Google UUID / ULID                        │
-│  - Registers callback channel in Trace Context Map     │
-│  - Pushes Tx object to High-Speed Ring Buffer          │
-│  - Returns HTTP 202 Accepted { tx_id: "uuid-v4..." }   │
-└──────────────────────────┬─────────────────────────────┘
-                           │
-                           │ 2. Ring Buffer Channel (Non-Blocking)
-                           ▼
-┌────────────────────────────────────────────────────────┐
-│  Worker Thread Pool (e.g., 128 Parallel Workers)       │
-│  - Batches 1,000 Txs per Micro-Batch (10ms window)      │
-│  - Computes State Delta (In-Memory RAM / YugabyteDB)   │
-└──────────────────────────┬─────────────────────────────┘
-                           │
-                           │ 3. Bulk Persist & Acknowledgment
-                           ▼
-┌────────────────────────────────────────────────────────┐
-│  Async Ack Engine & Storage Driver                     │
-│  - Bulk upsert to State DB                              │
-│  - Signal Context Channel / WebSocket Trace Stream     │
-└───────────────────────────────────────────────────────__
+## Verification
+
+You can verify the current state with:
+
+```bash
+go test ./pkg/dashboard ./pkg/hlf
+```
+
+And confirm the live metrics endpoint responds:
+
+```bash
+curl http://127.0.0.1:8080/api/metrics
+```
