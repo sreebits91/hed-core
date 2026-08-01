@@ -32,3 +32,12 @@ func (r *Registry) Get(name string) (StateEngine, error) {
 	}
 	return engine, nil
 }
+
+// List returns the registered plugin names.
+func (r *Registry) List() []string {
+	names := make([]string, 0, len(r.plugins))
+	for n := range r.plugins {
+		names = append(names, n)
+	}
+	return names
+}
