@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -35,6 +36,7 @@ type HLFServer struct {
 	installed       bool
 	phases          []PhaseStatus
 	logs            []map[string]string
+	deployer        *hlf.Deployer
 }
 
 func NewHLFServer(net *hlf.Network) *HLFServer {
@@ -42,10 +44,11 @@ func NewHLFServer(net *hlf.Network) *HLFServer {
 		network:         net,
 		peerCount:       4,
 		orgCount:        2,
-		channelName:     "mychannel",
+		channelName:     hlf.DefaultChannelID,
 		contractVersion: "hed-cc v1.0",
 		lastInstalledAt: "",
 		installed:       false,
+		deployer:        hlf.NewDeployer(hlf.DefaultOptions()),
 	}
 	s.resetPhases()
 	return s
@@ -185,9 +188,12 @@ func (s *HLFServer) applyDeploy() {
 
 func (s *HLFServer) BeginLifecycleSimulation() {
 	go func() {
-		time.Sleep(200 * time.Millisecond)
-		s.applyInstall(4, 2, "mychannel")
-		time.Sleep(250 * time.Millisecond)
+		s.addLog("SYSTEM", "Starting Fabric deployment pipeline")
+		s.applyInstall(4, 2, s.channelName)
+		s.addLog("SYSTEM", fmt.Sprintf("Launching Fabric deployer for channel %s", s.channelName))
+		if s.deployer != nil {
+			go s.deployer.RunDeployment()
+		}
 		s.applyDeploy()
 	}()
 }

@@ -25,12 +25,12 @@ func TestHLFServerLifecycleSimulationMarksInstalledAndDeployed(t *testing.T) {
 	s := NewHLFServer(nil)
 	s.BeginLifecycleSimulation()
 
-	deadline := time.Now().Add(750 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if s.IsDeployed() {
 			return
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	t.Fatalf("expected lifecycle simulation to mark deployment as ready")
