@@ -170,8 +170,8 @@ func main() {
 		}
 	}()
 
-	fmt.Println("\n🚀 Dashboard active at: http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	fmt.Println("\n🚀 Dashboard active at: http://0.0.0.0:8080")
+	log.Fatal(http.ListenAndServe("0.0.0.0:8080", nil))
 }
 
 func handleStartLoadTest(w http.ResponseWriter, r *http.Request) {
@@ -390,11 +390,11 @@ func handleInspectYugabyte(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, `<!DOCTYPE html>
 <html>
 <head>
-<meta charset="UTF-8">
+    <meta charset="UTF-8">
     <title>HED-Core 100k Txn Engine UI</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 24px; }
@@ -443,7 +443,7 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
         </div>
         <div class="card">
             <h3>Elapsed Time</h3>
-            <div id="elapsed" class="metric">0.s</div>
+            <div id="elapsed" class="metric">0.0s</div>
         </div>
     </div>
 
@@ -528,8 +528,34 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 
             txns.reverse().forEach(tx => {
                 const row = document.createElement('tr');
-                const formattedTime = new Date(tx.Timestamp).toLocaleTimeString() + '.' + new Date(tx.Timestamp).getMilliseconds();
-                row.innerHTML = '<td>' + tx.TxID + '</td><td>' + tx.SenderID + '</td><td>' + tx.ReceiverID + '</td><td>$' + (tx.Amount / 100).toFixed(2) + '</td><td>' + tx.ChannelID + '</td><td>' + formattedTime + '</td>';
+                
+                const txId = tx.TxID || tx.tx_id || 'N/A';
+                const sender = tx.SenderID || tx.sender_id || 'N/A';
+                const receiver = tx.ReceiverID || tx.receiver_id || 'N/A';
+                const amountVal = tx.Amount !== undefined ? tx.Amount : tx.amount;
+                const channel = tx.ChannelID || tx.channel_id || 'N/A';
+                const timestampVal = tx.Timestamp || tx.created_at || tx.CreatedAt;
+
+                const formattedAmount = typeof amountVal === 'number' 
+                    ? '$' + (amountVal / 100).toFixed(2) 
+                    : '$0.00';
+
+                let formattedTime = 'N/A';
+                if (timestampVal) {
+                    const d = new Date(timestampVal);
+                    if (!isNaN(d.getTime())) {
+                        const ms = String(d.getMilliseconds()).padStart(3, '0');
+                        formattedTime = d.toLocaleTimeString() + '.' + ms;
+                    }
+                }
+
+                row.innerHTML = '<td>' + txId + '</td>' +
+                                '<td>' + sender + '</td>' +
+                                '<td>' + receiver + '</td>' +
+                                '<td>' + formattedAmount + '</td>' +
+                                '<td>' + channel + '</td>' +
+                                '<td>' + formattedTime + '</td>';
+                
                 tbody.appendChild(row);
             });
         }
