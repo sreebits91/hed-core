@@ -1,758 +1,530 @@
 package dashboard
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
-	"sync"
+	"sync/atomic"
 	"time"
 
-	"hed-core/pkg/delta"
+	"hed-core/pkg/engine"
 	"hed-core/pkg/hlf"
 	"hed-core/pkg/plugin"
-	"hed-core/pkg/router"
 )
 
-var benchmarkBuffer = router.NewRingBuffer(1 << 16)
-
 type Server struct {
-	hlfServer      *HLFServer
-	deltaEngine    *delta.DeltaEngine
-	committer      *hlf.HLFCommitter
-	registry       *plugin.Registry
-	activeDB       plugin.StateEngine
-	workers        int
-	channels       int
-	totalTxs       int
-	batchSize      int
-	dbOpsPerTx     int
-	totalCount     uint64
-	dbLatencyTotal time.Duration
-	txLatencyTotal time.Duration
-	dbLatencyCount uint64
-	txLatencyCount uint64
-	mu             sync.Mutex
-	isTesting      bool
-	fabricReady    bool
+	pipeline   *engine.Pipeline
+	registry   *plugin.Registry
+	hlfServer  *HLFServer
+	committer  *hlf.HLFCommitter
+	isTesting  int32
+	cancelTest context.CancelFunc
 }
 
-func NewServer(registry *plugin.Registry, defaultDB plugin.StateEngine, hlfSrv *HLFServer, committer *hlf.HLFCommitter) *Server {
+func NewServer(reg *plugin.Registry, db plugin.StateEngine, hlfSrv *HLFServer, committer *hlf.HLFCommitter) *Server {
+	pipe := engine.NewPipeline(db, 32)
+
 	return &Server{
-		hlfServer:   hlfSrv,
-		registry:    registry,
-		activeDB:    defaultDB,
-		deltaEngine: delta.New(defaultDB),
-		committer:   committer,
-		workers:     128,
-		channels:    32,
-		totalTxs:    100000,
-		batchSize:   500,
-		dbOpsPerTx:  3,
-		isTesting:   false,
+		pipeline:  pipe,
+		registry:  reg,
+		hlfServer: hlfSrv,
+		committer: committer,
 	}
 }
 
-func (s *Server) Start(port string) error {
-	mux := http.DefaultServeMux
+func (s *Server) Start(addr string) error {
+	http.HandleFunc("/api/v1/tx", s.handleTxSubmission)
+	http.HandleFunc("/api/metrics", s.handleMetrics)
+	http.HandleFunc("/api/config", s.handleConfig)
+	http.HandleFunc("/api/benchmark", s.handleBenchmark)
+	http.HandleFunc("/api/logs", s.handleLogsSSE)
+	http.HandleFunc("/", s.handleDashboard)
 
-	// 1. Register UI & Engine Routes
-	mux.HandleFunc("/", s.handleIndex)
-	mux.HandleFunc("/api/metrics", s.handleMetricsStream)
-	mux.HandleFunc("/api/config", s.handleConfig)
-
-	// 2. Register HLF Telemetry, Install, Deploy & Log Routes
-	if s.hlfServer != nil {
-		s.hlfServer.RegisterRoutes(mux)
-	}
-
-	fmt.Printf("HED Web Dashboard running at http://localhost%s\n", port)
-	return http.ListenAndServe(port, mux)
+	return http.ListenAndServe(addr, nil)
 }
 
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(indexHTML))
-}
-
-func (s *Server) perTickTxCount() uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	batchSize := s.batchSize
-	if batchSize <= 0 {
-		batchSize = 1
+func (s *Server) handleTxSubmission(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	return uint64(batchSize)
-}
-
-func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		var req struct {
-			Engine     string `json:"engine"`
-			Workers    int    `json:"workers"`
-			Channels   int    `json:"channels"`
-			TotalTxs   int    `json:"totalTxs"`
-			BatchSize  int    `json:"batchSize"`
-			DbOpsPerTx int    `json:"dbOpsPerTx"`
-			IsTesting  bool   `json:"isTesting"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
-			s.mu.Lock()
-			if engine, err := s.registry.Get(req.Engine); err == nil {
-				s.activeDB = engine
-				s.deltaEngine = delta.New(engine)
-			}
-			if req.Workers > 0 {
-				s.workers = req.Workers
-			}
-			if req.Channels > 0 {
-				s.channels = req.Channels
-			}
-			if req.TotalTxs > 0 {
-				s.totalTxs = req.TotalTxs
-			}
-			if req.BatchSize > 0 {
-				s.batchSize = req.BatchSize
-			}
-			if req.DbOpsPerTx > 0 {
-				s.dbOpsPerTx = req.DbOpsPerTx
-			}
-			s.isTesting = req.IsTesting
-			s.mu.Unlock()
-		}
+	var req engine.TxPayload
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	shardName, ackLatencyUs := s.pipeline.SubmitTransaction(&req)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"activeEngine": s.activeDB.Name(),
-		"workers":      s.workers,
-		"channels":     s.channels,
-		"totalTxs":     s.totalTxs,
-		"batchSize":    s.batchSize,
-		"dbOpsPerTx":   s.dbOpsPerTx,
-		"isTesting":    s.isTesting,
+		"status":      "ACKNOWLEDGED",
+		"tx_uuid":     req.TxUUID,
+		"shard":       shardName,
+		"ack_time_us": ackLatencyUs,
 	})
 }
 
-func (s *Server) handleMetricsStream(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var total uint64
+	if s.committer != nil {
+		total += s.committer.TotalCommitted()
+	}
+	total += s.pipeline.TotalCommitted()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"committed_txs": total,
+		"engine":        s.pipeline.EngineName(),
+		"is_testing":    atomic.LoadInt32(&s.isTesting) == 1,
+	})
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var cfg struct {
+		Engine   string `json:"engine"`
+		Channels int    `json:"channels"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if cfg.Channels > 0 {
+		s.pipeline.SetShards(cfg.Channels)
+	}
+
+	if cfg.Engine != "" {
+		dbEngine, err := s.registry.Get(cfg.Engine)
+		if err == nil {
+			s.pipeline.SetStorageEngine(dbEngine)
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
+}
+
+func (s *Server) handleBenchmark(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Action   string `json:"action"`
+		Workers  int    `json:"workers"`
+		Channels int    `json:"channels"`
+		DelayUs  int    `json:"delay_us"`
+		Limit    int64  `json:"limit"` // 0 = continuous stream, >0 = stop after exact count
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Action == "stop" {
+		if s.cancelTest != nil {
+			s.cancelTest()
+			s.cancelTest = nil
+		}
+		atomic.StoreInt32(&s.isTesting, 0)
+		s.pipeline.EmitEvent(engine.EventSys, "", "", "Benchmark generator stopped manually.", 0)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "stopped"})
+		return
+	}
+
+	if atomic.LoadInt32(&s.isTesting) == 1 {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "already_running"})
+		return
+	}
+
+	workers := req.Workers
+	if workers <= 0 {
+		workers = 32
+	}
+
+	delay := req.DelayUs
+	if delay <= 0 {
+		delay = 200
+	}
+
+	limit := req.Limit
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancelTest = cancel
+	atomic.StoreInt32(&s.isTesting, 1)
+
+	limitText := "Continuous"
+	if limit > 0 {
+		limitText = fmt.Sprintf("%d transactions", limit)
+	}
+	s.pipeline.EmitEvent(engine.EventSys, "", "", fmt.Sprintf("Starting HTTP POST Benchmark [%d Workers | Target Limit: %s]", workers, limitText), 0)
+
+	tr := &http.Transport{
+		MaxIdleConns:        2000,
+		MaxIdleConnsPerHost: 2000,
+		IdleConnTimeout:     90 * time.Second,
+		DialContext: (&net.Dialer{
+			Timeout:   2 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
+	client := &http.Client{Transport: tr, Timeout: 3 * time.Second}
+
+	var sentCounter int64
+
+	for i := 0; i < workers; i++ {
+		go func(workerID int) {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					if limit > 0 {
+						current := atomic.AddInt64(&sentCounter, 1)
+						if current > limit {
+							// Target reached - trigger automatic halt
+							if atomic.CompareAndSwapInt32(&s.isTesting, 1, 0) {
+								s.pipeline.EmitEvent(engine.EventSys, "", "", fmt.Sprintf("🎯 Target benchmark limit reached (%d txs). Halting generator...", limit), 0)
+								if s.cancelTest != nil {
+									s.cancelTest()
+								}
+							}
+							return
+						}
+					}
+
+					txUUID := engine.GenerateUUID()
+					accountID := fmt.Sprintf("acc_%d", workerID%500)
+					payload := engine.TxPayload{
+						TxUUID:    txUUID,
+						AccountID: accountID,
+						Amount:    100,
+					}
+					bodyBytes, _ := json.Marshal(payload)
+
+					resp, err := client.Post("http://127.0.0.1:8080/api/v1/tx", "application/json", bytes.NewBuffer(bodyBytes))
+					if err == nil {
+						resp.Body.Close()
+					}
+					time.Sleep(time.Duration(delay) * time.Microsecond)
+				}
+			}
+		}(i)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "started"})
+}
+
+func (s *Server) handleLogsSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	subChan := s.pipeline.SubscribeEvents()
+	defer s.pipeline.UnsubscribeEvents(subChan)
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-
-	s.mu.Lock()
-	channels := s.channels
-	engine := s.deltaEngine
-	routerObj := router.NewGatewayRouter(channels)
-	s.mu.Unlock()
-
-	lastTime := time.Now()
-	var lastCount uint64
 
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case t := <-ticker.C:
-			s.mu.Lock()
-			testing := s.isTesting
-			curBatch := s.batchSize
-			curDbOps := s.dbOpsPerTx
-			curTotalTxs := s.totalTxs
-			curWorkers := s.workers
-			curChannels := s.channels
-			activeName := s.activeDB.Name()
-			s.mu.Unlock()
-
-			if testing {
-				if s.hlfServer != nil && !s.hlfServer.IsDeployed() {
-					lastTime = t
-					data, _ := json.Marshal(map[string]interface{}{
-						"tps":         0,
-						"totalTxs":    s.totalCount,
-						"targetTxs":   curTotalTxs,
-						"engine":      activeName,
-						"workers":     curWorkers,
-						"shards":      curChannels,
-						"batchSize":   curBatch,
-						"dbOpsPerTx":  curDbOps,
-						"avgDbCallMs": 0,
-						"avgTxMs":     0,
-						"isTesting":   testing,
-						"fabricReady": false,
-					})
-					fmt.Fprintf(w, "data: %s\n\n", data)
-					flusher.Flush()
-					continue
-				}
-
-				increment := s.perTickTxCount()
-				s.mu.Lock()
-				s.totalCount += increment
-				currentCount := s.totalCount
-				s.mu.Unlock()
-
-				channelsToFlush := make(map[string]struct{})
-				for i := uint64(0); i < increment; i++ {
-					acc := fmt.Sprintf("account_%d", i%1000)
-					ch := routerObj.RouteToShard(acc)
-					channelsToFlush[ch] = struct{}{}
-					payload := router.TransactionPayload{
-						TxID:      acc,
-						Namespace: ch,
-						Payload:   []byte("v"),
-						Key:       acc,
-					}
-					_ = benchmarkBuffer.Push(payload)
-					if s.hlfServer != nil && (i%50 == 0 || i == increment-1) {
-						s.hlfServer.addTxLog("TX", fmt.Sprintf("REQ %s payload=v", acc))
-						s.hlfServer.addTxLog("TX", fmt.Sprintf("ACK %s", acc))
-					}
-				}
-
-				batch, err := benchmarkBuffer.PopBatch(increment)
-				if err == nil && len(batch) > 0 {
-					for _, tx := range batch {
-						channelID := int(tx.TxID[len(tx.TxID)-1] % byte(curChannels))
-						if s.committer != nil {
-							txStart := time.Now()
-							s.committer.SubmitTx(channelID, tx.Key, tx.Payload)
-							txLatency := time.Since(txStart)
-							s.mu.Lock()
-							s.txLatencyTotal += txLatency
-							s.txLatencyCount++
-							s.mu.Unlock()
-						} else {
-							txStart := time.Now()
-							engine.ApplyDelta(tx.Namespace, tx.Key, 10)
-							txLatency := time.Since(txStart)
-							s.mu.Lock()
-							s.txLatencyTotal += txLatency
-							s.txLatencyCount++
-							s.mu.Unlock()
-						}
-					}
-				}
-
-				if s.committer == nil {
-					for ch := range channelsToFlush {
-						dbStart := time.Now()
-						if err := engine.FlushToDB(ch); err != nil {
-							fmt.Printf("delta flush failed: %v\n", err)
-						}
-						dbLatency := time.Since(dbStart)
-
-						s.mu.Lock()
-						s.dbLatencyTotal += dbLatency
-						s.dbLatencyCount++
-						s.mu.Unlock()
-					}
-				}
-
-				avgTxMs := 0.0
-				avgDBCallMs := 0.0
-				s.mu.Lock()
-				if s.txLatencyCount > 0 {
-					avgTxMs = float64(s.txLatencyTotal) / float64(s.txLatencyCount) / float64(time.Millisecond)
-				}
-				if s.dbLatencyCount > 0 {
-					avgDBCallMs = float64(s.dbLatencyTotal) / float64(s.dbLatencyCount) / float64(time.Millisecond)
-				}
-				s.mu.Unlock()
-
-				duration := t.Sub(lastTime).Seconds()
-				if duration <= 0 {
-					duration = 0.001
-				}
-				tps := float64(currentCount-lastCount) / duration
-
-				lastCount = currentCount
-				lastTime = t
-
-				data, _ := json.Marshal(map[string]interface{}{
-					"tps":         tps,
-					"totalTxs":    currentCount,
-					"targetTxs":   curTotalTxs,
-					"engine":      activeName,
-					"workers":     curWorkers,
-					"shards":      curChannels,
-					"batchSize":   curBatch,
-					"dbOpsPerTx":  curDbOps,
-					"avgDbCallMs": avgDBCallMs,
-					"avgTxMs":     avgTxMs,
-					"isTesting":   testing,
-					"fabricReady": s.hlfServer != nil && s.hlfServer.IsDeployed(),
-				})
-				fmt.Fprintf(w, "data: %s\n\n", data)
-				flusher.Flush()
+		case evt := <-subChan:
+			msg := map[string]interface{}{
+				"timestamp": evt.Timestamp,
+				"level":     string(evt.Type),
+				"tx_uuid":   evt.TxUUID,
+				"shard":     evt.Shard,
+				"message":   evt.Message,
 			}
+			data, _ := json.Marshal(msg)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
 		}
 	}
 }
 
-const indexHTML = `<!DOCTYPE html>
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	html := `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HED & Hyperledger Fabric Control Center</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <title>HED Core Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; }
-        .header { text-align: center; border-bottom: 1px solid #334155; padding-bottom: 15px; margin-bottom: 20px; }
-        .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px; }
-        .grid-6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 20px; }
-        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
-        
-        .card { background: #1e293b; border-radius: 8px; padding: 18px; border: 1px solid #334155; position: relative; }
-        .card-title { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; font-weight: bold; }
-        .card-value { font-size: 1.4rem; font-weight: bold; margin-top: 8px; color: #38bdf8; }
-        .card-subtext { font-size: 0.8rem; color: #64748b; margin-top: 4px; }
-        
-        .badge { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; }
-        .badge-pending { background: #475569; color: #cbd5e1; }
-        .badge-success { background: #15803d; color: #86efac; }
-        .badge-active { background: #0369a1; color: #7dd3fc; }
-
-        .btn { background: #0284c7; color: white; border: none; padding: 10px 16px; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; margin-top: 10px; width: 100%; }
-        .btn:hover { background: #0369a1; }
-        .btn-success { background: #16a34a; }
-        .btn-success:hover { background: #15803d; }
-        .btn-danger { background: #dc2626; }
-        .btn-danger:hover { background: #b91c1c; }
-
-        .chart-container { background: #1e293b; border-radius: 8px; padding: 20px; margin-bottom: 20px; border: 1px solid #334155; }
-        .controls { background: #1e293b; border-radius: 8px; padding: 20px; border: 1px solid #334155; margin-bottom: 20px; }
-        .controls-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-top: 15px; }
-        
-        .logs-box { background: #0f172a; border-radius: 6px; padding: 12px; height: 240px; overflow-y: auto; font-family: monospace; border: 1px solid #334155; }
-        .log-entry { border-bottom: 1px solid #1e293b; padding: 6px 0; font-size: 0.8rem; }
-        
-        select, input { background: #0f172a; color: #fff; border: 1px solid #475569; padding: 8px 12px; border-radius: 6px; width: 90%; }
-        label { font-size: 0.85rem; color: #94a3b8; display: block; margin-bottom: 5px; }
-
-        .stepper { display: flex; flex-direction: column; gap: 8px; margin-top: 15px; }
-        .step-item { display: flex; align-items: center; justify-content: space-between; background: #0f172a; padding: 8px 12px; border-radius: 6px; border-left: 3px solid #475569; }
-        .step-item.completed { border-left-color: #22c55e; }
-        .peer-tag { background: #0f172a; border: 1px solid #334155; padding: 6px 10px; border-radius: 6px; margin-bottom: 6px; font-size: 0.8rem; font-family: monospace; display: flex; justify-content: space-between; }
-
-        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); align-items: center; justify-content: center; }
-        .modal-content { background: #1e293b; border-radius: 8px; padding: 24px; border: 1px solid #475569; width: 450px; }
+        body { background-color: #0b0f19; color: #f8fafc; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+        .card { background-color: #161e2e; border: 1px solid #2d3748; color: #f8fafc; border-radius: 12px; }
+        .badge-active { background-color: #10b981; color: #064e3b; font-weight: 600; }
+        .badge-inactive { background-color: #ef4444; color: #7f1d1d; font-weight: 600; }
+        .metric-value { font-size: 2.2rem; font-weight: 700; color: #38bdf8; }
+        .btn-success { background-color: #10b981; border: none; }
+        .btn-danger { background-color: #ef4444; border: none; }
+        .terminal-box { background-color: #050811; border: 1px solid #1e293b; color: #10b981; font-family: monospace; font-size: 0.85rem; height: 360px; overflow-y: auto; padding: 12px; border-radius: 8px; }
+        .log-route { color: #38bdf8; }
+        .log-ack { color: #f59e0b; font-weight: bold; }
+        .log-order { color: #c084fc; }
+        .log-commit { color: #34d399; font-weight: bold; }
+        .log-sys { color: #94a3b8; }
+        .peer-status { font-size: 0.8rem; padding: 3px 8px; border-radius: 4px; }
     </style>
 </head>
-<body>
-
-    <div class="header">
-        <h1>HyperEngine-Drunix (HED) Control Center</h1>
-        <p>Hyperledger Fabric Dynamic Topology & Benchmarking Suite</p>
-    </div>
-
-    <!-- PHASE 1: INSTALLATION & CONTRACT DEPLOYMENT CARDS -->
-    <h2 style="font-size:1.1rem; color:#94a3b8; margin-bottom:10px;">Lifecycle Phase Controls</h2>
-    <div class="grid-4">
-        <div class="card">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <span class="card-title">Phase 1: Node Setup</span>
-                <span id="badge-install" class="badge badge-pending">NOT INSTALLED</span>
-            </div>
-            <div id="val-install-info" class="card-subtext" style="margin-top:10px;">Fabric Version: v2.5.4</div>
-            <div id="val-last-installed" class="card-subtext" style="color:#f59e0b;">Last Installed: Never</div>
-            <button id="btn-install" class="btn" onclick="handleInstallClick()">Start HLF Installation</button>
-        </div>
-
-        <div class="card">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <span class="card-title">Phase 2: Network Topology</span>
-                <span id="badge-topo" class="badge badge-pending">INACTIVE</span>
-            </div>
-            <div class="card-value" id="val-topo-nodes">0 Peers / 0 Ch</div>
-            <div class="card-subtext">Orderer: Raft Consensus</div>
-        </div>
-
-        <div class="card">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <span class="card-title">Phase 3: Smart Contract</span>
-                <span id="badge-deploy" class="badge badge-pending">UNCOMMITTED</span>
-            </div>
-            <div class="card-subtext" style="margin-top:10px;">Contract: <strong id="val-cc-name" style="color:#f59e0b;">None</strong></div>
-            <button id="btn-deploy" class="btn" onclick="triggerDeploy()" disabled>Deploy Contract</button>
-        </div>
-
-        <div class="card">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <span class="card-title">Phase 4: Benchmarking</span>
-                <span id="badge-test" class="badge badge-pending">OFF</span>
-            </div>
-            <div class="card-subtext" style="margin-top:10px;">Status: Tracking is paused until you start it</div>
-            <button id="btn-test" class="btn btn-success" onclick="toggleTest()" disabled>▶ Start Tracking</button>
-        </div>
-    </div>
-
-    <div class="grid-2">
-        <div class="card">
-            <h3>HLF Installation Phases Status</h3>
-            <div id="phaseStepper" class="stepper"></div>
-        </div>
-        <div class="card">
-            <h3>Active Peer Nodes Topology</h3>
-            <div id="peerList" style="max-height: 220px; overflow-y: auto;">
-                <div style="color:#94a3b8; font-size: 0.85rem;">No active peers provisioned. Run Phase 1 installation.</div>
-            </div>
-        </div>
-    </div>
-
-    <h2 style="font-size:1.1rem; color:#94a3b8; margin: 20px 0 10px 0;">Live Telemetry & Metrics</h2>
-    <div class="grid-6">
-        <div class="card">
-            <div class="card-title">Real-Time Throughput</div>
-            <div id="val-tps" class="card-value">0 TPS</div>
-            <div class="card-subtext">Peak: <span id="val-peak-tps">0</span> TPS</div>
-        </div>
-        <div class="card">
-            <div class="card-title">Total Tx Sent</div>
-            <div id="val-requests" class="card-value">0</div>
-            <div class="card-subtext">Target: <span id="val-target-txs">100,000</span></div>
-        </div>
-        <div class="card">
-            <div class="card-title">Endorsement ACKs</div>
-            <div id="val-acks" class="card-value" style="color:#4ade80;">0</div>
-            <div class="card-subtext">Received via Org MSPs</div>
-        </div>
-        <div class="card">
-            <div class="card-title">Committed Blocks</div>
-            <div id="val-commits" class="card-value" style="color:#38bdf8;">0</div>
-            <div class="card-subtext">Ledger Validated</div>
-        </div>
-        <div class="card">
-            <div class="card-title">DB Calls Made</div>
-            <div id="val-dbops" class="card-value" style="color:#f59e0b;">0</div>
-            <div class="card-subtext">KeyDB / Yugabyte Read-Write</div>
-        </div>
-        <div class="card">
-            <div class="card-title">Avg DB Call Time</div>
-            <div id="val-db-latency" class="card-value" style="color:#fb923c;">0 ms</div>
-            <div class="card-subtext">Measured across FlushToDB operations</div>
-        </div>
-        <div class="card">
-            <div class="card-title">Avg Tx Time</div>
-            <div id="val-tx-latency" class="card-value" style="color:#f472b6;">0 ms</div>
-            <div class="card-subtext">Observed per synthetic transaction</div>
-        </div>
-        <div class="card">
-            <div class="card-title">State DB Engine</div>
-            <div id="val-engine" class="card-value" style="font-size:1rem; color:#38bdf8;">KeyDB</div>
-            <div class="card-subtext">Shards: <span id="val-shards">16</span></div>
-        </div>
-    </div>
-
-    <div class="chart-container">
-        <canvas id="tpsChart" height="75"></canvas>
-    </div>
-
-    <div class="controls">
-        <h3 style="margin:0 0 10px 0; color:#38bdf8;">Configure Test & Engine Scalability Parameters</h3>
-        <div class="controls-grid">
+<body class="p-4">
+    <div class="container-fluid max-w-7xl">
+        <div class="d-flex justify-content-between align-items-center mb-4">
             <div>
-                <label>Active Database Plugin</label>
-                <select id="select-engine">
-                    <option value="In-Memory RAM (KeyDB)">In-Memory RAM (KeyDB)</option>
-                    <option value="YugabyteDB (Distributed SQL)">YugabyteDB (Distributed SQL)</option>
-                </select>
+                <h1 class="h2 mb-1">⚡ HyperEngine-Drunix (HED) Core</h1>
+                <p class="text-secondary mb-0">Production Sharded Distributed State Engine</p>
             </div>
             <div>
-                <label>Total Transactions to Send</label>
-                <input type="number" id="input-totaltxs" value="100000">
-            </div>
-            <div>
-                <label>Target Peer Batch Size</label>
-                <input type="number" id="input-batch" value="500">
-            </div>
-            <div>
-                <label>DB Ops / Ledger Tx</label>
-                <input type="number" id="input-dbops" value="3">
-            </div>
-            <div>
-                <label>Worker Threads</label>
-                <input type="number" id="input-workers" value="128">
-            </div>
-            <div>
-                <label>Shards / Channels</label>
-                <input type="number" id="input-shards" value="32">
+                <span class="badge badge-active px-3 py-2 rounded-pill me-2">Engine: <span id="activeEngine">KeyDB</span></span>
+                <span id="testBadge" class="badge badge-inactive px-3 py-2 rounded-pill">Benchmark: STOPPED</span>
             </div>
         </div>
-        <button class="btn" style="margin-top:15px;" onclick="applyConfig()">Apply Scalability Parameters</button>
-    </div>
 
-    <div class="grid-2">
-        <div class="card">
-            <h3>System & HLF Container Logs</h3>
-            <div id="nodeLogsBox" class="logs-box">
-                <div style="color:#94a3b8;">[SYSTEM] Awaiting HLF installation trigger...</div>
+        <div class="row g-3 mb-4">
+            <div class="col-md-4">
+                <div class="card p-3 d-flex flex-row align-items-center justify-content-between">
+                    <div>
+                        <div class="fw-bold">hed-peer-0.org1.hed.net</div>
+                        <small class="text-secondary">Stateless Ingest & KeyDB Tier-1 Execution</small>
+                    </div>
+                    <span class="peer-status bg-success text-dark fw-bold">ONLINE</span>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card p-3 d-flex flex-row align-items-center justify-content-between">
+                    <div>
+                        <div class="fw-bold">hed-peer-1.org1.hed.net</div>
+                        <small class="text-secondary">Tier-2 YugabyteDB Async SQL Flusher</small>
+                    </div>
+                    <span class="peer-status bg-success text-dark fw-bold">ONLINE</span>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card p-3 d-flex flex-row align-items-center justify-content-between">
+                    <div>
+                        <div class="fw-bold">hed-orderer-0.hed.net</div>
+                        <small class="text-secondary">HED Consensus & Block Batcher Service</small>
+                    </div>
+                    <span class="peer-status bg-success text-dark fw-bold">ONLINE</span>
+                </div>
             </div>
         </div>
-        <div class="card">
-            <h3>Live Ledger Call & Tx Stream</h3>
-            <div id="txLogsBox" class="logs-box">
-                <div style="color:#94a3b8;">Awaiting test start...</div>
-            </div>
-        </div>
-    </div>
 
-    <div id="installModal" class="modal">
-        <div class="modal-content">
-            <h3 style="margin-top:0; color:#38bdf8;">Hyperledger Fabric Installation Parameters</h3>
-            <p id="modalMsg" style="font-size:0.85rem; color:#94a3b8;">Configure node topology for automated provisioning:</p>
-            <div style="margin-bottom:12px;">
-                <label>Number of Peer Nodes</label>
-                <input type="number" id="modal-peers" value="4" min="1" max="16">
+        <div class="row g-4 mb-4">
+            <div class="col-md-4">
+                <div class="card p-3">
+                    <div class="text-secondary mb-1">Total Committed Transactions</div>
+                    <div class="metric-value" id="txCount">0</div>
+                </div>
             </div>
-            <div style="margin-bottom:12px;">
-                <label>Number of Organizations (MSPs)</label>
-                <input type="number" id="modal-orgs" value="2" min="1" max="8">
+            <div class="col-md-4">
+                <div class="card p-3">
+                    <div class="text-secondary mb-1">Live Ingestion Throughput</div>
+                    <div class="metric-value" id="tpsRate">0 <small class="fs-6 text-secondary">TPS</small></div>
+                </div>
             </div>
-            <div style="margin-bottom:18px;">
-                <label>Channel Names (comma separated)</label>
-                <input type="text" id="modal-channel" value="mychannel,anotherchannel">
+            <div class="col-md-4">
+                <div class="card p-3">
+                    <div class="text-secondary mb-1">Sharded Gateway Channels</div>
+                    <div class="metric-value"><span id="channelVal">32</span> <small class="fs-6 text-secondary">Shards</small></div>
+                </div>
             </div>
-            <div style="display:flex; gap:10px;">
-                <button class="btn btn-success" onclick="confirmInstallation()">OK / Provision</button>
-                <button class="btn btn-danger" onclick="closeModal()">Cancel</button>
+        </div>
+
+        <div class="row g-4 mb-4">
+            <div class="col-md-5">
+                <div class="card p-4 h-100">
+                    <h3 class="h5 mb-3">🛠️ Engine Topology & Benchmark Control</h3>
+                    
+                    <div class="mb-3">
+                        <label class="form-label text-secondary d-flex justify-content-between">
+                            <span>Max Test Limit (Transactions)</span>
+                            <span class="fw-bold text-warning" id="limitDisplay">10,000 txs</span>
+                        </label>
+                        <input type="range" class="form-range" id="limitSlider" min="0" max="100000" step="5000" value="10000" oninput="updateLimitLabel(this.value)">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label text-secondary d-flex justify-content-between">
+                            <span>Parallel Ingest Workers</span>
+                            <span class="fw-bold text-info" id="workerVal">32</span>
+                        </label>
+                        <input type="range" class="form-range" id="workerSlider" min="1" max="128" value="32" oninput="document.getElementById('workerVal').innerText = this.value">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label text-secondary d-flex justify-content-between">
+                            <span>Sharded Channels</span>
+                            <span class="fw-bold text-info" id="channelSliderVal">32</span>
+                        </label>
+                        <input type="range" class="form-range" id="channelSlider" min="4" max="128" value="32" oninput="document.getElementById('channelSliderVal').innerText = this.value; document.getElementById('channelVal').innerText = this.value">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label text-secondary d-flex justify-content-between">
+                            <span>Inter-Request Delay (µs)</span>
+                            <span class="fw-bold text-info" id="delayVal">200</span>
+                        </label>
+                        <input type="range" class="form-range" id="delaySlider" min="50" max="2000" value="200" step="50" oninput="document.getElementById('delayVal').innerText = this.value">
+                    </div>
+
+                    <div class="mb-4">
+                        <label class="form-label text-secondary">Active Storage Engine Plugin</label>
+                        <select id="engineSelect" class="form-select bg-dark text-light border-secondary">
+                            <option value="KeyDB">KeyDB In-Memory RAM Store (Tier-1)</option>
+                            <option value="YugabyteDB (Distributed SQL)">YugabyteDB Distributed SQL (Tier-2 Async)</option>
+                        </select>
+                    </div>
+
+                    <div class="d-flex gap-2">
+                        <button onclick="toggleBenchmark('start')" class="btn btn-success flex-grow-1 py-2">Start Batch Test</button>
+                        <button onclick="toggleBenchmark('stop')" class="btn btn-danger flex-grow-1 py-2">Halt</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-7">
+                <div class="card p-4 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h3 class="h5 mb-0">📺 Core Event Stream Terminal</h3>
+                        <button onclick="clearLogs()" class="btn btn-sm btn-outline-secondary">Clear</button>
+                    </div>
+                    <div class="terminal-box" id="terminal">
+                        <div class="log-sys">[SYSTEM] Initialized Core Event Bus Streamer. Connected...</div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 
     <script>
-        let chart;
-        let peakTPS = 0;
-        let isTesting = false;
-        let isInstalled = false;
+        let lastCount = 0;
+        let lastTime = Date.now();
 
-        window.addEventListener('DOMContentLoaded', () => {
-            const ctx = document.getElementById('tpsChart').getContext('2d');
-            chart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [{
-                        label: 'Real-Time Transaction Throughput (TPS)',
-                        data: [],
-                        borderColor: '#38bdf8',
-                        backgroundColor: 'rgba(56, 189, 248, 0.1)',
-                        fill: true,
-                        tension: 0.3
-                    }]
-                },
-                options: { responsive: true, scales: { y: { beginAtZero: true } }, animation: false }
-            });
-
-            initMetricsStream();
-            setInterval(fetchTelemetry, 1000);
-            setInterval(fetchSystemLogs, 2000);
-        });
-
-        function initMetricsStream() {
-            const evtSource = new EventSource('/api/metrics');
-            evtSource.onmessage = function(e) {
-                try {
-                    const data = JSON.parse(e.data);
-                    const currentTPS = Math.round(data.tps);
-                    
-                    if (currentTPS > peakTPS) {
-                        peakTPS = currentTPS;
-                        document.getElementById('val-peak-tps').innerText = peakTPS.toLocaleString();
-                    }
-
-                    document.getElementById('val-tps').innerText = currentTPS.toLocaleString() + ' TPS';
-                    document.getElementById('val-engine').innerText = data.engine;
-                    document.getElementById('val-shards').innerText = data.shards;
-                    document.getElementById('val-target-txs').innerText = parseInt(data.targetTxs).toLocaleString();
-                    document.getElementById('val-requests').innerText = parseInt(data.totalTxs).toLocaleString();
-                    document.getElementById('val-acks').innerText = Math.round(data.totalTxs * 0.99).toLocaleString();
-                    document.getElementById('val-commits').innerText = Math.round(data.totalTxs * 0.98).toLocaleString();
-                    document.getElementById('val-dbops').innerText = Math.round(data.totalTxs * data.dbOpsPerTx).toLocaleString();
-                    document.getElementById('val-db-latency').innerText = (data.avgDbCallMs || 0).toFixed(2) + ' ms';
-                    document.getElementById('val-tx-latency').innerText = (data.avgTxMs || 0).toFixed(2) + ' ms';
-
-                    const now = new Date().toLocaleTimeString();
-                    if (chart.data.labels.length > 30) {
-                        chart.data.labels.shift();
-                        chart.data.datasets[0].data.shift();
-                    }
-                    chart.data.labels.push(now);
-                    chart.data.datasets[0].data.push(currentTPS);
-                    chart.update();
-                } catch(err) {
-                    console.error("SSE parse error:", err);
-                }
-            };
-        }
-
-        function handleInstallClick() {
-            const modal = document.getElementById('installModal');
-            const msg = document.getElementById('modalMsg');
-            if (isInstalled) {
-                msg.innerText = "Fabric is ALREADY installed. Do you want to reinstall with new parameters?";
+        function updateLimitLabel(val) {
+            val = parseInt(val);
+            if (val === 0) {
+                document.getElementById('limitDisplay').innerText = "Continuous (Unlimited)";
             } else {
-                msg.innerText = "Configure node topology for fresh provisioning:";
+                document.getElementById('limitDisplay').innerText = val.toLocaleString() + " txs";
             }
-            modal.style.display = "flex";
         }
 
-        function closeModal() {
-            document.getElementById('installModal').style.display = "none";
-        }
-
-        async function confirmInstallation() {
-            closeModal();
-            document.getElementById('btn-install').innerText = "Installing Nodes...";
-            
-            const peerCount = parseInt(document.getElementById('modal-peers').value);
-            const orgCount = parseInt(document.getElementById('modal-orgs').value);
-            const channelName = document.getElementById('modal-channel').value;
-            const channels = channelName;
-
-            await fetch('/api/hlf/install', { 
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ peerCount, orgCount, channelName, channels })
-            });
-
-            isInstalled = true;
-            document.getElementById('badge-install').innerText = "INSTALLED";
-            document.getElementById('badge-install').className = "badge badge-success";
-            document.getElementById('btn-install').innerText = "Reinstall HLF Network";
-
-            document.getElementById('badge-topo').innerText = "ACTIVE";
-            document.getElementById('badge-topo').className = "badge badge-active";
-            document.getElementById('btn-deploy').disabled = false;
-        }
-
-        async function triggerDeploy() {
-            document.getElementById('btn-deploy').innerText = "Deploying...";
-            await fetch('/api/hlf/deploy', { method: 'POST' });
-            document.getElementById('badge-deploy').innerText = "COMMITTED";
-            document.getElementById('badge-deploy').className = "badge badge-success";
-            document.getElementById('btn-deploy').innerText = "Contract Deployed";
-            document.getElementById('btn-deploy').disabled = true;
-
-            document.getElementById('btn-test').disabled = false;
-        }
-
-        function toggleTest() {
-            isTesting = !isTesting;
-            const btn = document.getElementById('btn-test');
-            const badge = document.getElementById('badge-test');
-
-            if (isTesting) {
-                btn.innerText = "⏸ Stop Tracking";
-                btn.className = "btn btn-danger";
-                badge.innerText = "RUNNING";
-                badge.className = "badge badge-active";
-            } else {
-                btn.innerText = "▶ Start Tracking";
-                btn.className = "btn btn-success";
-                badge.innerText = "OFF";
-                badge.className = "badge badge-pending";
-            }
-            applyConfig();
-        }
-
-        function applyConfig() {
-            fetch('/api/config', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    engine: document.getElementById('select-engine').value,
-                    workers: parseInt(document.getElementById('input-workers').value),
-                    channels: parseInt(document.getElementById('input-shards').value),
-                    totalTxs: parseInt(document.getElementById('input-totaltxs').value),
-                    batchSize: parseInt(document.getElementById('input-batch').value),
-                    dbOpsPerTx: parseInt(document.getElementById('input-dbops').value),
-                    isTesting: isTesting
-                })
-            });
-        }
-
-        async function fetchTelemetry() {
+        async function fetchMetrics() {
             try {
-                const res = await fetch('/api/hlf/telemetry');
-                if (!res.ok) return;
+                const res = await fetch('/api/metrics');
                 const data = await res.json();
                 
-                if (data.last_installed_at) {
-                    document.getElementById('val-last-installed').innerText = "Last Installed: " + data.last_installed_at;
+                const now = Date.now();
+                const timeDiff = (now - lastTime) / 1000;
+                const countDiff = data.committed_txs - lastCount;
+                
+                let tps = 0;
+                if (timeDiff > 0 && lastCount > 0) {
+                    tps = Math.round(countDiff / timeDiff);
                 }
 
-                document.getElementById('val-cc-name').innerText = data.contract_version;
+                document.getElementById('txCount').innerText = data.committed_txs.toLocaleString();
+                document.getElementById('tpsRate').innerText = tps.toLocaleString();
+                document.getElementById('activeEngine').innerText = data.engine;
 
-                if (data.peers && data.peers.length > 0) {
-                    document.getElementById('val-topo-nodes').innerText = data.peers.length + ' Peers / ' + data.channels.length + ' Ch';
-                    document.getElementById('peerList').innerHTML = data.peers.map(p => 
-                        '<div class="peer-tag">' +
-                            '<span><strong style="color:#38bdf8;">' + p.name + '</strong> (' + p.msp + ')</span>' +
-                            '<span style="color:#4ade80;">' + p.endpoint + '</span>' +
-                        '</div>'
-                    ).join('');
+                const badge = document.getElementById('testBadge');
+                if (data.is_testing) {
+                    badge.innerText = 'Benchmark: RUNNING';
+                    badge.className = 'badge badge-active px-3 py-2 rounded-pill';
+                } else {
+                    badge.innerText = 'Benchmark: STOPPED';
+                    badge.className = 'badge badge-inactive px-3 py-2 rounded-pill';
                 }
 
-                if (data.phases && data.phases.length > 0) {
-                    document.getElementById('phaseStepper').innerHTML = data.phases.map(p => 
-                        '<div class="step-item ' + (p.status === 'COMPLETED' ? 'completed' : '') + '">' +
-                            '<div>' +
-                                '<div style="font-weight:bold; font-size:0.85rem;">' + p.name + '</div>' +
-                                '<div style="font-size:0.75rem; color:#64748b;">' + p.description + '</div>' +
-                            '</div>' +
-                            '<span class="badge ' + (p.status === 'COMPLETED' ? 'badge-success' : 'badge-pending') + '">' + p.status + '</span>' +
-                        '</div>'
-                    ).join('');
-                }
-            } catch (err) {}
+                lastCount = data.committed_txs;
+                lastTime = now;
+            } catch (err) {
+                console.error("Failed to fetch metrics", err);
+            }
         }
 
-        async function fetchSystemLogs() {
-            try {
-                const res = await fetch('/api/hlf/logs');
-                if (!res.ok) return;
-                const data = await res.json();
-                const nodeLogsBox = document.getElementById('nodeLogsBox');
-                const txLogsBox = document.getElementById('txLogsBox');
+        async function toggleBenchmark(action) {
+            const workers = parseInt(document.getElementById('workerSlider').value);
+            const channels = parseInt(document.getElementById('channelSlider').value);
+            const delay = parseInt(document.getElementById('delaySlider').value);
+            const limit = parseInt(document.getElementById('limitSlider').value);
+            const engine = document.getElementById('engineSelect').value;
 
-                if (nodeLogsBox && data.logs && data.logs.length > 0) {
-                    nodeLogsBox.innerHTML = data.logs.map(log => 
-                        '<div class="log-entry" style="color:#94a3b8;">' +
-                            '<span style="color:#f59e0b;">[' + log.timestamp + ']</span> ' +
-                            '<span style="color:#38bdf8;">[' + log.node + ']</span> ' + log.message +
-                        '</div>'
-                    ).join('');
-                } else if (nodeLogsBox) {
-                    nodeLogsBox.innerHTML = '<div style="color:#94a3b8;">[SYSTEM] Awaiting HLF installation trigger...</div>';
-                }
+            await fetch('/api/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ engine: engine, channels: channels })
+            });
 
-                if (txLogsBox) {
-                    const txLogs = Array.isArray(data.txLogs) ? data.txLogs : [];
-                    if (txLogs.length > 0) {
-                        txLogsBox.innerHTML = txLogs.map(log => 
-                            '<div class="log-entry" style="color:#cbd5e1;">' +
-                                '<span style="color:#f59e0b;">[' + log.timestamp + ']</span> ' +
-                                '<span style="color:#4ade80;">[' + log.node + ']</span> ' + log.message +
-                            '</div>'
-                        ).join('');
-                    } else {
-                        txLogsBox.innerHTML = '<div style="color:#94a3b8;">Awaiting test start...</div>';
-                    }
-                }
-            } catch (err) {}
+            await fetch('/api/benchmark', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: action, workers: workers, channels: channels, delay_us: delay, limit: limit })
+            });
+
+            fetchMetrics();
         }
+
+        function clearLogs() {
+            document.getElementById('terminal').innerHTML = '';
+        }
+
+        const evtSource = new EventSource('/api/logs');
+        evtSource.onmessage = function(event) {
+            const msg = JSON.parse(event.data);
+            const term = document.getElementById('terminal');
+            
+            let classMap = {
+                'ACK': 'log-ack',
+                'ORDER': 'log-order',
+                'COMMIT': 'log-commit',
+                'SYS': 'log-sys'
+            };
+            let cls = classMap[msg.level] || 'log-sys';
+            let uuidPart = msg.tx_uuid ? ' [' + msg.tx_uuid + ']' : '';
+            let shardPart = msg.shard ? ' [' + msg.shard + ']' : '';
+            
+            let logLine = document.createElement('div');
+            logLine.className = cls;
+            logLine.innerText = '[' + msg.timestamp + '] [' + msg.level + ']' + shardPart + uuidPart + ' ' + msg.message;
+            
+            term.appendChild(logLine);
+
+            if (term.childNodes.length > 200) {
+                term.removeChild(term.firstChild);
+            }
+            term.scrollTop = term.scrollHeight;
+        };
+
+        setInterval(fetchMetrics, 1000);
+        fetchMetrics();
     </script>
 </body>
 </html>`
+
+	fmt.Fprint(w, html)
+}

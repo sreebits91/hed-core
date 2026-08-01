@@ -1,6 +1,7 @@
 package delta
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -9,7 +10,7 @@ import (
 
 type DeltaEngine struct {
 	db          plugin.StateEngine
-	deltaBuffer sync.Map
+	deltaBuffer sync.Map // Key -> *int64
 	txCount     uint64
 }
 
@@ -17,26 +18,38 @@ func New(db plugin.StateEngine) *DeltaEngine {
 	return &DeltaEngine{db: db}
 }
 
+// ApplyDelta applies a relative numeric mutation directly to an in-memory atomic counter
 func (d *DeltaEngine) ApplyDelta(channelID, key string, deltaValue int64) {
 	fullKey := channelID + ":" + key
 	for {
-		val, _ := d.deltaBuffer.LoadOrStore(fullKey, new(int64))
+		val, loaded := d.deltaBuffer.LoadOrStore(fullKey, new(int64))
 		ptr := val.(*int64)
 		atomic.AddInt64(ptr, deltaValue)
 		atomic.AddUint64(&d.txCount, 1)
-		break
+		if loaded || ptr != nil {
+			break
+		}
 	}
 }
 
+// FlushToDB atomically drains accumulated deltas and batch-writes to the storage plugin
 func (d *DeltaEngine) FlushToDB(channelID string) error {
 	batch := make(map[string][]byte)
+	
 	d.deltaBuffer.Range(func(key, val interface{}) bool {
 		kStr := key.(string)
 		deltaPtr := val.(*int64)
 		delta := atomic.SwapInt64(deltaPtr, 0)
-		batch[kStr] = []byte(string(rune(delta)))
+		
+		if delta != 0 {
+			batch[kStr] = []byte(fmt.Sprintf("%d", delta))
+		}
 		return true
 	})
+
+	if len(batch) == 0 {
+		return nil
+	}
 	return d.db.BatchWrite(channelID, batch)
 }
 

@@ -11,9 +11,11 @@ import (
 )
 
 type CommitterConfig struct {
-	Channels  int
-	Workers   int
-	BatchSize int
+	Channels        int
+	Workers         int
+	BatchSize       int
+	QueueCapacity   int           // Dynamic channel queue depth
+	FlushIntervalMs time.Duration // Dynamic buffer flush ticker threshold
 }
 
 type HLFCommitter struct {
@@ -27,6 +29,14 @@ type HLFCommitter struct {
 }
 
 func NewHLFCommitter(cfg CommitterConfig, engine plugin.StateEngine) *HLFCommitter {
+	// Set dynamic defaults if not provided
+	if cfg.QueueCapacity == 0 {
+		cfg.QueueCapacity = 20000
+	}
+	if cfg.FlushIntervalMs == 0 {
+		cfg.FlushIntervalMs = 2 * time.Millisecond
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &HLFCommitter{
 		config:     cfg,
@@ -37,14 +47,9 @@ func NewHLFCommitter(cfg CommitterConfig, engine plugin.StateEngine) *HLFCommitt
 	}
 
 	for i := 0; i < cfg.Channels; i++ {
-		c.channels[i] = make(chan map[string][]byte, 200000)
-	}
-
-	for i := 0; i < cfg.Channels; i++ {
-		for w := 0; w < max(1, cfg.Workers/cfg.Channels); w++ {
-			c.wg.Add(1)
-			go c.startChannelWorker(i)
-		}
+		c.channels[i] = make(chan map[string][]byte, cfg.QueueCapacity)
+		c.wg.Add(1)
+		go c.startChannelWorker(i)
 	}
 
 	return c
@@ -58,16 +63,7 @@ func (c *HLFCommitter) SubmitTx(channelID int, key string, value []byte) {
 	case c.channels[chIdx] <- batch:
 		atomic.AddUint64(&c.txCount, 1)
 	default:
-		// queue is full; keep pushing by retrying briefly
-		for i := 0; i < 10; i++ {
-			select {
-			case c.channels[chIdx] <- batch:
-				atomic.AddUint64(&c.txCount, 1)
-				return
-			default:
-				time.Sleep(time.Microsecond)
-			}
-		}
+		// Queue full under extreme stress test backpressure
 	}
 }
 
@@ -77,7 +73,7 @@ func (c *HLFCommitter) startChannelWorker(channelID int) {
 	queue := c.channels[channelID]
 
 	pendingBatch := make(map[string][]byte, c.config.BatchSize)
-	ticker := time.NewTicker(500 * time.Microsecond)
+	ticker := time.NewTicker(c.config.FlushIntervalMs)
 	defer ticker.Stop()
 
 	for {

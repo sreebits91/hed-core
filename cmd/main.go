@@ -3,16 +3,39 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
+	"strconv"
+	"time"
 
 	"hed-core/pkg/dashboard"
 	"hed-core/pkg/hlf"
 	"hed-core/pkg/plugin"
 )
 
+func getEnvInt(key string, defaultVal int) int {
+	if valStr := os.Getenv(key); valStr != "" {
+		if val, err := strconv.Atoi(valStr); err == nil {
+			return val
+		}
+	}
+	return defaultVal
+}
+
 func main() {
-	// 1. Initialize Registry & 32-way sharded KeyDB Engine
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	shardCount := uint32(getEnvInt("KEYDB_SHARDS", 64))
+	channelsCount := getEnvInt("HLF_CHANNELS", 32)
+	workersCount := getEnvInt("HLF_WORKERS", 128)
+	batchSize := getEnvInt("HLF_BATCH_SIZE", 500)
+	queueCap := getEnvInt("HLF_QUEUE_CAPACITY", 50000)
+
+	// 1. Initialize Registry & KeyDB Engine
 	reg := plugin.NewRegistry()
-	keydbEngine := plugin.NewKeyDBEngine()
+	keydbEngine := plugin.NewKeyDBEngine("KeyDB", shardCount)
 	reg.Register(keydbEngine)
 
 	defaultDB, err := reg.Get("KeyDB")
@@ -20,24 +43,27 @@ func main() {
 		log.Fatalf("Failed to load KeyDB plugin: %v", err)
 	}
 
-	// 2. Initialize Parallel Committer (32 Channels, 128 Workers, 500 Batch)
+	// 2. Initialize Committer
 	committer := hlf.NewHLFCommitter(hlf.CommitterConfig{
-		Channels:  32,
-		Workers:   128,
-		BatchSize: 500,
+		Channels:        channelsCount,
+		Workers:         workersCount,
+		BatchSize:       batchSize,
+		QueueCapacity:   queueCap,
+		FlushIntervalMs: 2 * time.Millisecond,
 	}, defaultDB)
 
-	// 3. Initialize Servers
+	// 3. Start Dashboard Server (Pass 4 arguments including committer)
 	hlfNet := &hlf.Network{}
 	hlfSrv := dashboard.NewHLFServer(hlfNet)
-	hlfSrv.BeginLifecycleSimulation()
 	srv := dashboard.NewServer(reg, defaultDB, hlfSrv, committer)
 
 	defer committer.Stop()
 
-	port := ":8080"
-	fmt.Printf("Starting HED Core Engine on http://localhost%s\n", port)
-	if err := srv.Start(port); err != nil {
+	listenAddr := fmt.Sprintf(":%s", port)
+	fmt.Printf("Starting HED Core Engine [Shards: %d | Channels: %d | Workers: %d] on http://localhost%s\n",
+		shardCount, channelsCount, workersCount, listenAddr)
+
+	if err := srv.Start(listenAddr); err != nil {
 		log.Fatalf("Dashboard server failed: %v", err)
 	}
 }
