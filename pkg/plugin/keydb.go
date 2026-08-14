@@ -3,7 +3,6 @@ package plugin
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -22,15 +21,10 @@ func NewKeyDBEngine(addr string, poolSize int) *KeyDBEngine {
 		ReadTimeout:  3 * time.Second,
 		WriteTimeout: 3 * time.Second,
 	})
-	return &KeyDBEngine{
-		client: client,
-		addr:   addr,
-	}
+	return &KeyDBEngine{client: client, addr: addr}
 }
 
-func (k *KeyDBEngine) Name() string {
-	return "KeyDB-Production-Incr"
-}
+func (k *KeyDBEngine) Name() string { return "KeyDB-Production-Incr" }
 
 func (k *KeyDBEngine) Init(config map[string]string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -54,60 +48,42 @@ func (k *KeyDBEngine) PutState(channelID string, key string, value []byte) error
 	return k.client.Set(ctx, fullKey, value, 0).Err()
 }
 
-// BatchWrite executes INCRBY operations in 1,000-command pipeline chunks with exponential backoff retries
+// BatchWrite applies a batch of relative updates. It intentionally does not
+// retry an INCRBY pipeline: after a network error the server outcome may be
+// unknown, and replaying INCRBY can double-apply a successfully executed batch.
+// The caller must retain/retry the logical batch at a higher level only when it
+// has an idempotency mechanism, or use a transactional store with request IDs.
 func (k *KeyDBEngine) BatchWrite(channelID string, updates map[string]int64) error {
 	if len(updates) == 0 {
 		return nil
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	pipe := k.client.Pipeline()
 	count := 0
-
 	for key, val := range updates {
 		if val == 0 {
 			continue
 		}
-
-		fullKey := channelID + ":" + key
-		// INCRBY ensures relative updates accumulate safely without overwriting state
-		pipe.IncrBy(ctx, fullKey, val)
+		pipe.IncrBy(ctx, fmt.Sprintf("%s:%s", channelID, key), val)
 		count++
 
 		if count%1000 == 0 {
-			if err := k.execWithRetry(ctx, pipe); err != nil {
-				return fmt.Errorf("pipeline chunk failed after retries: %w", err)
+			if _, err := pipe.Exec(ctx); err != nil {
+				return fmt.Errorf("KeyDB pipeline chunk failed (outcome may be unknown): %w", err)
 			}
 			pipe = k.client.Pipeline()
 		}
 	}
 
 	if count > 0 && count%1000 != 0 {
-		if err := k.execWithRetry(ctx, pipe); err != nil {
-			return fmt.Errorf("final pipeline chunk failed after retries: %w", err)
+		if _, err := pipe.Exec(ctx); err != nil {
+			return fmt.Errorf("KeyDB final pipeline failed (outcome may be unknown): %w", err)
 		}
 	}
-
 	return nil
-}
-
-// execWithRetry handles network failures with 3 retry attempts using exponential backoff
-func (k *KeyDBEngine) execWithRetry(ctx context.Context, pipe redis.Pipeliner) error {
-	maxRetries := 3
-	backoff := 10 * time.Millisecond
-
-	for i := 0; i < maxRetries; i++ {
-		_, err := pipe.Exec(ctx)
-		if err == nil {
-			return nil
-		}
-
-		log.Printf("⚠️ [STORAGE RETRY] KeyDB pipeline write failed (attempt %d/%d): %v", i+1, maxRetries, err)
-		time.Sleep(backoff)
-		backoff *= 2
-	}
-
-	return fmt.Errorf("exceeded max pipeline retry attempts")
 }
 
 func (k *KeyDBEngine) Close() error {
