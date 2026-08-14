@@ -1,6 +1,7 @@
 package delta
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -15,45 +16,42 @@ type shard struct {
 }
 
 type DeltaEngine struct {
-	db      *plugin.KeyDBEngine
+	db      plugin.StateEngine
 	shards  [numShards]*shard
 	txCount uint64
 }
 
-func New(db *plugin.KeyDBEngine) *DeltaEngine {
-	e := &DeltaEngine{
-		db: db,
-	}
+func New(db plugin.StateEngine) *DeltaEngine {
+	e := &DeltaEngine{db: db}
 	for i := 0; i < numShards; i++ {
-		e.shards[i] = &shard{
-			items: make(map[string]*int64, 1024),
-		}
+		e.shards[i] = &shard{items: make(map[string]*int64, 1024)}
 	}
 	return e
 }
 
-func (d *DeltaEngine) getShard(key string) *shard {
+func (d *DeltaEngine) getShard(channelID, key string) *shard {
 	var hash uint32 = 2166136261
-	for i := 0; i < len(key); i++ {
-		hash ^= uint32(key[i])
+	for _, value := range []byte(channelID + "\x00" + key) {
+		hash ^= uint32(value)
 		hash *= 16777619
 	}
 	return d.shards[hash%numShards]
 }
 
-// ApplyDelta executes microsecond atomic updates in RAM
+// ApplyDelta executes microsecond-scale relative updates in RAM.
 func (d *DeltaEngine) ApplyDelta(channelID, key string, deltaValue int64) {
 	if deltaValue == 0 {
 		return
 	}
 
-	s := d.getShard(key)
+	s := d.getShard(channelID, key)
+	compositeKey := channelID + "\x00" + key
 
 	s.Lock()
-	ptr, exists := s.items[key]
+	ptr, exists := s.items[compositeKey]
 	if !exists {
 		ptr = new(int64)
-		s.items[key] = ptr
+		s.items[compositeKey] = ptr
 	}
 	s.Unlock()
 
@@ -61,26 +59,33 @@ func (d *DeltaEngine) ApplyDelta(channelID, key string, deltaValue int64) {
 	atomic.AddUint64(&d.txCount, 1)
 }
 
-// FlushToDB swaps map references to isolate background writes and purges idle RAM keys
+// FlushToDB durably applies a snapshot. Failed writes are restored into the
+// active shard maps so a transient storage failure cannot silently lose deltas.
 func (d *DeltaEngine) FlushToDB(channelID string) error {
-	batch := make(map[string]int64, 4096)
+	if d.db == nil {
+		return fmt.Errorf("delta storage engine is nil")
+	}
 
+	batch := make(map[string]int64, 4096)
 	for i := 0; i < numShards; i++ {
 		s := d.shards[i]
-
-		// 1. Double-Buffering Swap: Swap current shard map with a fresh active map
 		s.Lock()
 		snapshot := s.items
 		s.items = make(map[string]*int64, len(snapshot))
 		s.Unlock()
 
-		// 2. Process snapshot safely without holding locks during network latency
-		for keyStr, deltaPtr := range snapshot {
-			deltaVal := atomic.LoadInt64(deltaPtr)
-			if deltaVal != 0 {
-				batch[keyStr] = deltaVal
+		for compositeKey, deltaPtr := range snapshot {
+			parts := splitCompositeKey(compositeKey)
+			if parts.channel != channelID {
+				// Preserve deltas belonging to other channels in the active map.
+				s.Lock()
+				s.items[compositeKey] = deltaPtr
+				s.Unlock()
+				continue
 			}
-			// Automatic eviction: If deltaVal == 0, key is NOT copied into new map
+			if deltaVal := atomic.LoadInt64(deltaPtr); deltaVal != 0 {
+				batch[parts.key] += deltaVal
+			}
 		}
 	}
 
@@ -88,8 +93,39 @@ func (d *DeltaEngine) FlushToDB(channelID string) error {
 		return nil
 	}
 
-	// 3. Flush aggregated batch to KeyDB via INCRBY pipeline
-	return d.db.BatchWrite(channelID, batch)
+	if err := d.db.BatchWrite(channelID, batch); err != nil {
+		// Requeue the failed aggregate. Do not overwrite newer deltas: merge them
+		// into the current active value using atomic addition.
+		for key, deltaVal := range batch {
+			s := d.getShard(channelID, key)
+			compositeKey := channelID + "\x00" + key
+			s.Lock()
+			ptr, exists := s.items[compositeKey]
+			if !exists {
+				ptr = new(int64)
+				s.items[compositeKey] = ptr
+			}
+			s.Unlock()
+			atomic.AddInt64(ptr, deltaVal)
+		}
+		return fmt.Errorf("persist delta batch: %w", err)
+	}
+
+	return nil
+}
+
+type compositeParts struct {
+	channel string
+	key     string
+}
+
+func splitCompositeKey(value string) compositeParts {
+	for i := 0; i < len(value); i++ {
+		if value[i] == 0 {
+			return compositeParts{channel: value[:i], key: value[i+1:]}
+		}
+	}
+	return compositeParts{key: value}
 }
 
 func (d *DeltaEngine) GetTxCount() uint64 {
