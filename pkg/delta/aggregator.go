@@ -2,7 +2,6 @@ package delta
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"time"
 
@@ -42,8 +41,6 @@ func (a *Aggregator) StartFlushers(ctx context.Context, numFlushers int) {
 					return
 				}
 				if err := a.engine.BatchWrite("channel1", batch); err != nil {
-					// Keep the failed batch available for the next flush rather than
-					// silently dropping state.
 					return
 				}
 				batch = make(map[string]int64, 1000)
@@ -70,6 +67,3 @@ func (a *Aggregator) StartFlushers(ctx context.Context, numFlushers int) {
 		}()
 	}
 }
-
-// Validate that the constructor's storage contract remains usable at compile time.
-var _ = fmt.Sprintf
