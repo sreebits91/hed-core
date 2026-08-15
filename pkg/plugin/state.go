@@ -19,27 +19,39 @@ type StateEngine interface {
 }
 
 type Registry struct {
-	mu sync.RWMutex
+	mu      sync.RWMutex
 	plugins map[string]StateEngine
 }
 
-func NewRegistry() *Registry { return &Registry{plugins: make(map[string]StateEngine)} }
+func NewRegistry() *Registry {
+	return &Registry{plugins: make(map[string]StateEngine)}
+}
 
 func (r *Registry) Register(engine StateEngine) {
-	if engine == nil { return }
-	r.mu.Lock(); r.plugins[engine.Name()] = engine; r.mu.Unlock()
+	if engine == nil {
+		return
+	}
+	r.mu.Lock()
+	r.plugins[engine.Name()] = engine
+	r.mu.Unlock()
 }
 
 func (r *Registry) Get(name string) (StateEngine, error) {
-	r.mu.RLock(); engine, exists := r.plugins[name]; r.mu.RUnlock()
-	if !exists { return nil, fmt.Errorf("plugin %s not found", name) }
+	r.mu.RLock()
+	engine, exists := r.plugins[name]
+	r.mu.RUnlock()
+	if !exists {
+		return nil, fmt.Errorf("plugin %s not found", name)
+	}
 	return engine, nil
 }
 
 func (r *Registry) List() []string {
 	r.mu.RLock()
 	names := make([]string, 0, len(r.plugins))
-	for n := range r.plugins { names = append(names, n) }
+	for n := range r.plugins {
+		names = append(names, n)
+	}
 	r.mu.RUnlock()
 	return names
 }
