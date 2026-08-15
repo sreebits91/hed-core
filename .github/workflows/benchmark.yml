@@ -1,0 +1,47 @@
+name: HED TPS Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_tps:
+        description: Target submission rate
+        required: true
+        default: "100000"
+      duration:
+        description: Benchmark duration
+        required: true
+        default: "10s"
+      workers:
+        description: Producer goroutines
+        required: true
+        default: "64"
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download dependencies
+        run: go mod download
+      - name: Run benchmark
+        run: |
+          go run ./cmd/benchmark \
+            -tps "${{ inputs.target_tps }}" \
+            -duration "${{ inputs.duration }}" \
+            -workers "${{ inputs.workers }}" \
+            -json benchmark-result.json
+      - name: Publish benchmark result
+        uses: actions/upload-artifact@v4
+        with:
+          name: hed-tps-benchmark
+          path: benchmark-result.json
