@@ -25,11 +25,11 @@ type pendingBatch struct {
 }
 
 type DeltaEngine struct {
-	db         plugin.StateEngine
-	shards     [numShards]*shard
-	txCount    uint64
-	pendingMu  sync.Mutex
-	pending    []pendingBatch
+	db        plugin.StateEngine
+	shards    [numShards]*shard
+	txCount   uint64
+	pendingMu sync.Mutex
+	pending   []pendingBatch
 }
 
 func New(db plugin.StateEngine) *DeltaEngine {

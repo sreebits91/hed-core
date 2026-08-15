@@ -32,14 +32,14 @@ type Metrics struct {
 }
 
 var (
-	metrics        Metrics
-	metricsLock    sync.RWMutex
-	keydbEngine    *plugin.KeyDBEngine
-	deltaEngine    *delta.DeltaEngine
-	contractEng    *contract.SmartContractEngine
-	auditLedger    *ledger.AuditLedger
-	logs           []string
-	logsLock       sync.Mutex
+	metrics     Metrics
+	metricsLock sync.RWMutex
+	keydbEngine *plugin.KeyDBEngine
+	deltaEngine *delta.DeltaEngine
+	contractEng *contract.SmartContractEngine
+	auditLedger *ledger.AuditLedger
+	logs        []string
+	logsLock    sync.Mutex
 
 	yugaDB         *sql.DB
 	yugaChan       chan *types.PaymentTransaction

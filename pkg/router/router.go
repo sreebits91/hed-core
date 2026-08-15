@@ -44,7 +44,7 @@ func (r *GatewayRouter) RouteToShard(accountID string) string {
 // 2PC Phase 1: Lock Funds on Source Channel & Generate Cryptographic Proof-of-Lock
 func (r *GatewayRouter) Phase1_LockFunds(fromAccount string, amount int64, toShard string) (*ProofOfLock, error) {
 	fromShard := r.RouteToShard(fromAccount)
-	
+
 	// Deduct / Lock funds on Source Channel
 	lockKey := fmt.Sprintf("lock_%s_%d", fromAccount, time.Now().UnixNano())
 	if err := r.db.PutState(fromShard, lockKey, []byte(fmt.Sprintf("-%d", amount))); err != nil {
