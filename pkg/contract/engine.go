@@ -62,7 +62,7 @@ func (sc *SmartContractEngine) ExecuteRules(tx *types.PaymentTransaction) (*type
 	if sc.FeeBasisPts < 0 || sc.FeeBasisPts > 10000 {
 		return fail("invalid contract fee basis points")
 	}
-	if tx.Amount > math.MaxInt64/sc.FeeBasisPts && sc.FeeBasisPts != 0 {
+	if sc.FeeBasisPts != 0 && tx.Amount > math.MaxInt64/sc.FeeBasisPts {
 		return fail("fee calculation would overflow")
 	}
 
