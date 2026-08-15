@@ -3,14 +3,26 @@ name: HED TPS Benchmark
 on:
   workflow_dispatch:
     inputs:
-      target_tps:
-        description: Target submission rate
+      start_tps:
+        description: Initial offered TPS (0 = auto)
         required: true
-        default: "100000"
-      duration:
-        description: Benchmark duration
+        default: "0"
+      max_tps:
+        description: Maximum offered TPS (0 = auto)
         required: true
-        default: "10s"
+        default: "0"
+      growth:
+        description: Multiplicative rate increase per stage
+        required: true
+        default: "1.5"
+      stages:
+        description: Maximum ramp stages
+        required: true
+        default: "8"
+      stage_duration:
+        description: Duration per stage
+        required: true
+        default: "3s"
       workers:
         description: Producer goroutines
         required: true
@@ -22,7 +34,7 @@ permissions:
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,15 +45,18 @@ jobs:
           cache: true
       - name: Download dependencies
         run: go mod download
-      - name: Run benchmark
+      - name: Run adaptive throughput benchmark
         run: |
           go run ./cmd/benchmark \
-            -tps "${{ inputs.target_tps }}" \
-            -duration "${{ inputs.duration }}" \
+            -start-tps "${{ inputs.start_tps }}" \
+            -max-tps "${{ inputs.max_tps }}" \
+            -growth "${{ inputs.growth }}" \
+            -stages "${{ inputs.stages }}" \
+            -stage-duration "${{ inputs.stage_duration }}" \
             -workers "${{ inputs.workers }}" \
             -json benchmark-result.json
       - name: Publish benchmark result
         uses: actions/upload-artifact@v4
         with:
-          name: hed-tps-benchmark
+          name: hed-adaptive-tps-benchmark
           path: benchmark-result.json
