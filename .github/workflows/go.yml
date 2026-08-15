@@ -23,7 +23,18 @@ jobs:
       - name: Download dependencies
         run: go mod download
       - name: Format check
-        run: test -z "$(gofmt -l .)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t go_files < <(git ls-files '*.go' | grep -v '^pkg/dashboard/fabric-samples/' || true)
+          if ((${#go_files[@]} > 0)); then
+            unformatted="$(gofmt -l "${go_files[@]}")"
+            if [[ -n "$unformatted" ]]; then
+              echo "The following HED-owned Go files are not gofmt-clean:"
+              printf '%s\n' "$unformatted"
+              exit 1
+            fi
+          fi
       - name: Vet
         run: go vet ./...
       - name: Unit tests
