@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -15,18 +16,27 @@ import (
 	"hed-core/pkg/hlf"
 )
 
+type runtimeStats struct {
+	NumGC         uint32 `json:"num_gc"`
+	TotalAllocMB  uint64 `json:"total_alloc_mb"`
+	HeapAllocMB   uint64 `json:"heap_alloc_mb"`
+	Goroutines    int    `json:"goroutines"`
+	GOMAXPROCS    int    `json:"gomaxprocs"`
+}
+
 type stageResult struct {
-	TargetTPS       int     `json:"target_tps"`
-	DurationSeconds float64 `json:"duration_seconds"`
-	Accepted        uint64  `json:"accepted"`
-	Committed       uint64  `json:"committed"`
-	Rejected        uint64  `json:"rejected"`
-	ActualTPS       float64 `json:"actual_tps"`
-	P50Us           int64   `json:"p50_us"`
-	P95Us           int64   `json:"p95_us"`
-	P99Us           int64   `json:"p99_us"`
-	ErrorRate       float64 `json:"error_rate"`
-	Saturated       bool    `json:"saturated"`
+	TargetTPS       int          `json:"target_tps"`
+	DurationSeconds float64      `json:"duration_seconds"`
+	Accepted        uint64       `json:"accepted"`
+	Committed       uint64       `json:"committed"`
+	Rejected        uint64       `json:"rejected"`
+	ActualTPS       float64      `json:"actual_tps"`
+	P50Us           int64        `json:"submit_p50_us"`
+	P95Us           int64        `json:"submit_p95_us"`
+	P99Us           int64        `json:"submit_p99_us"`
+	ErrorRate       float64      `json:"error_rate"`
+	Saturated       bool         `json:"saturated"`
+	Runtime         runtimeStats `json:"runtime"`
 }
 
 type benchmarkResult struct {
@@ -43,6 +53,18 @@ type benchmarkResult struct {
 	StopReason      string        `json:"stop_reason"`
 }
 
+func readRuntimeStats() runtimeStats {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return runtimeStats{
+		NumGC: m.NumGC,
+		TotalAllocMB: m.TotalAlloc / 1024 / 1024,
+		HeapAllocMB: m.HeapAlloc / 1024 / 1024,
+		Goroutines: runtime.NumGoroutine(),
+		GOMAXPROCS: runtime.GOMAXPROCS(0),
+	}
+}
+
 func percentile(values []int64, p float64) int64 {
 	if len(values) == 0 {
 		return 0
@@ -53,6 +75,7 @@ func percentile(values []int64, p float64) int64 {
 
 func runStage(target int, duration time.Duration, workers, batch int, flush time.Duration, maxError float64, maxP99 time.Duration) stageResult {
 	committer := hlf.NewHLFCommitter(hlf.BatchConfig{MaxBatchSize: batch, FlushTimeout: flush, WorkerCount: workers})
+	before := readRuntimeStats()
 
 	var latencies []int64
 	var latMu sync.Mutex
@@ -94,6 +117,7 @@ func runStage(target int, duration time.Duration, workers, batch int, flush time
 	wg.Wait()
 	committer.Stop()
 	elapsed := time.Since(start)
+	after := readRuntimeStats()
 
 	acceptedCount := atomic.LoadUint64(&accepted)
 	rejectedCount := atomic.LoadUint64(&rejected)
@@ -117,6 +141,13 @@ func runStage(target int, duration time.Duration, workers, batch int, flush time
 		TargetTPS: target, DurationSeconds: elapsed.Seconds(), Accepted: acceptedCount,
 		Committed: committed, Rejected: rejectedCount, ActualTPS: actualTPS,
 		P50Us: p50, P95Us: p95, P99Us: p99, ErrorRate: errorRate, Saturated: saturated,
+		Runtime: runtimeStats{
+			NumGC: after.NumGC - before.NumGC,
+			TotalAllocMB: after.TotalAllocMB - before.TotalAllocMB,
+			HeapAllocMB: after.HeapAllocMB,
+			Goroutines: after.Goroutines,
+			GOMAXPROCS: after.GOMAXPROCS,
+		},
 	}
 }
 
@@ -124,13 +155,13 @@ func main() {
 	startTPS := flag.Int("start-tps", 0, "initial offered rate; 0 derives it from worker count")
 	maxTPS := flag.Int("max-tps", 0, "maximum offered rate; 0 derives it from the ramp")
 	growth := flag.Float64("growth", 1.5, "multiplicative increase between stages")
-	stages := flag.Int("stages", 8, "maximum number of ramp stages")
+	stages := flag.Int("stages", 12, "maximum number of ramp stages")
 	stageDuration := flag.Duration("stage-duration", 3*time.Second, "duration of each ramp stage")
 	workers := flag.Int("workers", 64, "producer goroutines")
 	batch := flag.Int("batch", 2000, "committer batch size")
 	flush := flag.Duration("flush", 10*time.Millisecond, "committer flush interval")
 	maxError := flag.Float64("max-error-rate", 0.01, "error rate at which a stage is saturated")
-	maxP99 := flag.Duration("max-p99", 0, "optional p99 latency saturation threshold; 0 disables it")
+	maxP99 := flag.Duration("max-p99", 0, "optional p99 submit latency saturation threshold; 0 disables it")
 	jsonOut := flag.String("json", "", "optional JSON output file")
 	flag.Parse()
 
@@ -160,7 +191,7 @@ func main() {
 	for stage := 0; stage < *stages && target <= *maxTPS; stage++ {
 		result := runStage(target, *stageDuration, *workers, *batch, *flush, *maxError, *maxP99)
 		out.Stages = append(out.Stages, result)
-		fmt.Printf("stage=%d target=%d actual=%.0f committed=%d p99=%dus errors=%.2f%% saturated=%t\n", stage+1, result.TargetTPS, result.ActualTPS, result.Committed, result.P99Us, result.ErrorRate*100, result.Saturated)
+		fmt.Printf("stage=%d target=%d actual=%.0f committed=%d submit_p99=%dus errors=%.2f%% saturated=%t gc=%d alloc=%dMB goroutines=%d\n", stage+1, result.TargetTPS, result.ActualTPS, result.Committed, result.P99Us, result.ErrorRate*100, result.Saturated, result.Runtime.NumGC, result.Runtime.TotalAllocMB, result.Runtime.Goroutines)
 		if result.Saturated {
 			out.StopReason = "saturation threshold reached"
 			break
