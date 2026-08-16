@@ -17,11 +17,11 @@ import (
 )
 
 type runtimeStats struct {
-	NumGC         uint32 `json:"num_gc"`
-	TotalAllocMB  uint64 `json:"total_alloc_mb"`
-	HeapAllocMB   uint64 `json:"heap_alloc_mb"`
-	Goroutines    int    `json:"goroutines"`
-	GOMAXPROCS    int    `json:"gomaxprocs"`
+	NumGC        uint32 `json:"num_gc"`
+	TotalAllocMB uint64 `json:"total_alloc_mb"`
+	HeapAllocMB  uint64 `json:"heap_alloc_mb"`
+	Goroutines   int    `json:"goroutines"`
+	GOMAXPROCS   int    `json:"gomaxprocs"`
 }
 
 type stageResult struct {
@@ -57,11 +57,11 @@ func readRuntimeStats() runtimeStats {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return runtimeStats{
-		NumGC: m.NumGC,
+		NumGC:        m.NumGC,
 		TotalAllocMB: m.TotalAlloc / 1024 / 1024,
-		HeapAllocMB: m.HeapAlloc / 1024 / 1024,
-		Goroutines: runtime.NumGoroutine(),
-		GOMAXPROCS: runtime.GOMAXPROCS(0),
+		HeapAllocMB:  m.HeapAlloc / 1024 / 1024,
+		Goroutines:   runtime.NumGoroutine(),
+		GOMAXPROCS:   runtime.GOMAXPROCS(0),
 	}
 }
 
@@ -142,11 +142,11 @@ func runStage(target int, duration time.Duration, workers, batch int, flush time
 		Committed: committed, Rejected: rejectedCount, ActualTPS: actualTPS,
 		P50Us: p50, P95Us: p95, P99Us: p99, ErrorRate: errorRate, Saturated: saturated,
 		Runtime: runtimeStats{
-			NumGC: after.NumGC - before.NumGC,
+			NumGC:        after.NumGC - before.NumGC,
 			TotalAllocMB: after.TotalAllocMB - before.TotalAllocMB,
-			HeapAllocMB: after.HeapAllocMB,
-			Goroutines: after.Goroutines,
-			GOMAXPROCS: after.GOMAXPROCS,
+			HeapAllocMB:  after.HeapAllocMB,
+			Goroutines:   after.Goroutines,
+			GOMAXPROCS:   after.GOMAXPROCS,
 		},
 	}
 }
