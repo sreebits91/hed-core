@@ -1,0 +1,84 @@
+name: HED TPS Benchmark
+
+on:
+  push:
+    branches: ["fix/p0-storage-contract"]
+    paths:
+      - "cmd/benchmark/**"
+      - ".github/workflows/benchmark.yml"
+      - "pkg/engine/**"
+      - "pkg/hlf/**"
+  workflow_dispatch:
+    inputs:
+      start_tps:
+        description: Initial offered TPS (0 = auto)
+        required: true
+        default: "0"
+      max_tps:
+        description: Maximum offered TPS (0 = auto)
+        required: true
+        default: "0"
+      growth:
+        description: Multiplicative rate increase per stage
+        required: true
+        default: "1.5"
+      stages:
+        description: Maximum ramp stages
+        required: true
+        default: "8"
+      stage_duration:
+        description: Duration per stage
+        required: true
+        default: "3s"
+      workers:
+        description: Producer goroutines
+        required: true
+        default: "64"
+
+env:
+  START_TPS: "0"
+  MAX_TPS: "0"
+  GROWTH: "1.5"
+  STAGES: "8"
+  STAGE_DURATION: "3s"
+  WORKERS: "64"
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download dependencies
+        run: go mod download
+      - name: Run adaptive throughput benchmark
+        env:
+          BENCH_START_TPS: ${{ inputs.start_tps || env.START_TPS }}
+          BENCH_MAX_TPS: ${{ inputs.max_tps || env.MAX_TPS }}
+          BENCH_GROWTH: ${{ inputs.growth || env.GROWTH }}
+          BENCH_STAGES: ${{ inputs.stages || env.STAGES }}
+          BENCH_STAGE_DURATION: ${{ inputs.stage_duration || env.STAGE_DURATION }}
+          BENCH_WORKERS: ${{ inputs.workers || env.WORKERS }}
+        run: |
+          go run ./cmd/benchmark \
+            -start-tps "$BENCH_START_TPS" \
+            -max-tps "$BENCH_MAX_TPS" \
+            -growth "$BENCH_GROWTH" \
+            -stages "$BENCH_STAGES" \
+            -stage-duration "$BENCH_STAGE_DURATION" \
+            -workers "$BENCH_WORKERS" \
+            -json benchmark-result.json
+      - name: Publish benchmark result
+        uses: actions/upload-artifact@v4
+        with:
+          name: hed-adaptive-tps-benchmark
+          path: benchmark-result.json

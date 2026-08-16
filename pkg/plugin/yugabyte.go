@@ -1,128 +1,142 @@
 package plugin
 
 import (
-    "context"
-    "fmt"
-    "log"
-    "time"
+	"context"
+	"fmt"
+	"time"
 
-    "github.com/jackc/pgx/v5"
-    "github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type YugabyteEngine struct {
-    pool *pgxpool.Pool
-}
+type YugabyteEngine struct{ pool *pgxpool.Pool }
 
 func NewYugabyteEngine(connString string) (*YugabyteEngine, error) {
-    config, err := pgxpool.ParseConfig(connString)
-    if err != nil {
-        return nil, fmt.Errorf("failed to parse connection config: %w", err)
-    }
-
-    // High-throughput connection pool settings
-    config.MaxConns = 128
-    config.MinConns = 32
-    config.MaxConnIdleTime = 5 * time.Minute
-
-    // FIX 1: Changed context.Background()d() -> context.Background()
-    pool, err := pgxpool.NewWithConfig(context.Background(), config)
-    if err != nil {
-        return nil, fmt.Errorf("failed to create pgx pool: %w", err)
-    }
-
-    return &YugabyteEngine{pool: pool}, nil
+	config, err := pgxpool.ParseConfig(connString)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse connection config: %w", err)
+	}
+	config.MaxConns = 128
+	config.MinConns = 32
+	config.MaxConnIdleTime = 5 * time.Minute
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create pgx pool: %w", err)
+	}
+	return &YugabyteEngine{pool: pool}, nil
 }
 
-func (y *YugabyteEngine) Name() string {
-    return "YugabyteDB-Distributed-SQL"
-}
+func (y *YugabyteEngine) Name() string { return "YugabyteDB-Distributed-SQL" }
 
 func (y *YugabyteEngine) Init(config map[string]string) error {
-    // FIX 2: Changed context.Background()d() -> context.Background()
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
-
-    // Ensure table schema exists
-    query := `
-    CREATE TABLE IF NOT EXISTS channel_states (
-        channel_id VARCHAR(64),
-        account_id VARCHAR(64),
-        balance BIGINT,
-        PRIMARY KEY (channel_id, account_id)
-    );`
-
-    _, err := y.pool.Exec(ctx, query)
-    return err
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := y.pool.Exec(ctx, `
+        CREATE TABLE IF NOT EXISTS channel_states (
+            channel_id VARCHAR(64), account_id VARCHAR(64), balance BIGINT,
+            PRIMARY KEY (channel_id, account_id)
+        );
+        CREATE TABLE IF NOT EXISTS hed_processed_batches (
+            request_id VARCHAR(128) PRIMARY KEY,
+            processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );`)
+	return err
 }
 
-// BatchWrite converts RAM deltas into high-throughput Yugabyte UPSERT batch statements
 func (y *YugabyteEngine) BatchWrite(channelID string, updates map[string]int64) error {
-    if len(updates) == 0 {
-        return nil
-    }
+	return y.batchWrite(context.Background(), "", channelID, updates)
+}
 
-    // FIX 3: Changed context.Background()d() -> context.Background()
-    ctx := context.Background()
-    batch := &pgx.Batch{}
+// BatchWriteWithID uses one SQL transaction for the idempotency marker and all
+// balance mutations. A retry either sees the committed marker and becomes a
+// no-op, or re-executes the whole transaction; partial batches cannot be left
+// behind by a client timeout.
+func (y *YugabyteEngine) BatchWriteWithID(requestID, channelID string, updates map[string]int64) error {
+	if requestID == "" {
+		return fmt.Errorf("request ID is required for idempotent write")
+	}
+	return y.batchWrite(context.Background(), requestID, channelID, updates)
+}
 
-    // SQL Atomic Delta Accumulation: ON CONFLICT DO UPDATE balance = balance + EXCLUDED.balance
-    sqlStmt := `
+func (y *YugabyteEngine) batchWrite(ctx context.Context, requestID, channelID string, updates map[string]int64) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	tx, err := y.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin state batch: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if requestID != "" {
+		var inserted bool
+		err = tx.QueryRow(ctx, `
+            INSERT INTO hed_processed_batches(request_id) VALUES($1)
+            ON CONFLICT DO NOTHING RETURNING true`, requestID).Scan(&inserted)
+		if err == pgx.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("reserve idempotency request: %w", err)
+		}
+	}
+
+	const sqlStmt = `
         INSERT INTO channel_states (channel_id, account_id, balance)
         VALUES ($1, $2, $3)
         ON CONFLICT (channel_id, account_id)
-        DO UPDATE SET balance = channel_states.balance + EXCLUDED.balance;
-    `
+        DO UPDATE SET balance = channel_states.balance + EXCLUDED.balance;`
 
-    count := 0
-    for key, val := range updates {
-        if val == 0 {
-            continue
-        }
-        batch.Queue(sqlStmt, channelID, key, val)
-        count++
-
-        // Send in 500-statement batch micro-chunks optimized for Yugabyte Raft consensus
-        if count%500 == 0 {
-            if err := y.sendBatchWithRetry(ctx, batch); err != nil {
-                return err
-            }
-            batch = &pgx.Batch{}
-        }
-    }
-
-    if count > 0 && count%500 != 0 {
-        if err := y.sendBatchWithRetry(ctx, batch); err != nil {
-            return err
-        }
-    }
-
-    return nil
+	batch := &pgx.Batch{}
+	count := 0
+	for key, val := range updates {
+		if val == 0 {
+			continue
+		}
+		batch.Queue(sqlStmt, channelID, key, val)
+		count++
+	}
+	if count > 0 {
+		if err := tx.SendBatch(ctx, batch).Close(); err != nil {
+			return fmt.Errorf("apply state batch: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit state batch: %w", err)
+	}
+	return nil
 }
 
-// FIX 4: Changed param type from context.Background()d -> context.Context
-func (y *YugabyteEngine) sendBatchWithRetry(ctx context.Context, batch *pgx.Batch) error {
-    maxRetries := 3
-    backoff := 15 * time.Millisecond
-
-    for i := 0; i < maxRetries; i++ {
-        br := y.pool.SendBatch(ctx, batch)
-        err := br.Close()
-        if err == nil {
-            return nil
-        }
-
-        log.Printf("⚠️ [YUGABYTE RETRY] Batch write failed (attempt %d/%d): %v", i+1, maxRetries, err)
-        time.Sleep(backoff)
-        backoff *= 2
-    }
-
-    return fmt.Errorf("exceeded max Yugabyte batch retry attempts")
+func (y *YugabyteEngine) GetState(channelID, key string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var balance int64
+	err := y.pool.QueryRow(ctx, `SELECT balance FROM channel_states WHERE channel_id=$1 AND account_id=$2`, channelID, key).Scan(&balance)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return []byte(fmt.Sprintf("%d", balance)), nil
 }
 
+func (y *YugabyteEngine) PutState(channelID, key string, value []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := y.pool.Exec(ctx, `
+        INSERT INTO channel_states(channel_id, account_id, balance) VALUES($1,$2,$3)
+        ON CONFLICT(channel_id,account_id) DO UPDATE SET balance=EXCLUDED.balance`, channelID, key, stringToInt64(value))
+	return err
+}
+
+func stringToInt64(value []byte) int64 { var n int64; fmt.Sscanf(string(value), "%d", &n); return n }
 func (y *YugabyteEngine) Close() error {
-    if y.pool != nil {
-        y.pool.Close()
-    }
-    return nil
+	if y.pool != nil {
+		y.pool.Close()
+	}
+	return nil
 }
