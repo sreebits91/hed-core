@@ -41,18 +41,18 @@ type stageResult struct {
 }
 
 type benchmarkResult struct {
-	Mode             string        `json:"mode"`
-	Workers          int           `json:"workers"`
-	BatchSize        int           `json:"batch_size"`
-	FlushMS          int           `json:"flush_ms"`
+	Mode              string        `json:"mode"`
+	Workers           int           `json:"workers"`
+	BatchSize         int           `json:"batch_size"`
+	FlushMS           int           `json:"flush_ms"`
 	LatencySampleRate int           `json:"latency_sample_rate"`
-	StartTPS         int           `json:"start_tps"`
-	MaxTPS           int           `json:"max_tps"`
-	GrowthFactor     float64       `json:"growth_factor"`
-	StageDuration    float64       `json:"stage_duration_seconds"`
-	Stages           []stageResult `json:"stages"`
-	PeakSustainable  int           `json:"peak_sustainable_tps"`
-	StopReason       string        `json:"stop_reason"`
+	StartTPS          int           `json:"start_tps"`
+	MaxTPS            int           `json:"max_tps"`
+	GrowthFactor      float64       `json:"growth_factor"`
+	StageDuration     float64       `json:"stage_duration_seconds"`
+	Stages            []stageResult `json:"stages"`
+	PeakSustainable   int           `json:"peak_sustainable_tps"`
+	StopReason        string        `json:"stop_reason"`
 }
 
 func readRuntimeStats() runtimeStats {
@@ -62,7 +62,9 @@ func readRuntimeStats() runtimeStats {
 }
 
 func percentile(values []int64, p float64) int64 {
-	if len(values) == 0 { return 0 }
+	if len(values) == 0 {
+		return 0
+	}
 	idx := int(float64(len(values)-1) * p)
 	return values[idx]
 }
@@ -83,15 +85,23 @@ func runStage(target int, duration time.Duration, workers, batch int, flush time
 			local := make([]int64, 0, 1024)
 			for seq := workerID; ; seq += workers {
 				now := time.Now()
-				if now.After(deadline) { break }
+				if now.After(deadline) {
+					break
+				}
 				targetAt := time.Duration(float64(seq) * float64(time.Second) / float64(target))
-				if wait := targetAt - now.Sub(start); wait > 0 { time.Sleep(wait) }
-				if time.Now().After(deadline) { break }
+				if wait := targetAt - now.Sub(start); wait > 0 {
+					time.Sleep(wait)
+				}
+				if time.Now().After(deadline) {
+					break
+				}
 				tx := &engine.TxPayload{TxUUID: engine.GenerateUUID(), AccountID: fmt.Sprintf("acc-%d", seq), Amount: 1}
 				txStart := time.Now()
 				if committer.SubmitTx(tx) {
 					atomic.AddUint64(&accepted, 1)
-					if sampleRate == 1 || seq%sampleRate == 0 { local = append(local, time.Since(txStart).Microseconds()) }
+					if sampleRate == 1 || seq%sampleRate == 0 {
+						local = append(local, time.Since(txStart).Microseconds())
+					}
 				} else {
 					atomic.AddUint64(&rejected, 1)
 				}
@@ -108,13 +118,17 @@ func runStage(target int, duration time.Duration, workers, batch int, flush time
 	rejectedCount := atomic.LoadUint64(&rejected)
 	committed := committer.TotalCommitted()
 	all := make([]int64, 0)
-	for _, local := range latencies { all = append(all, local...) }
+	for _, local := range latencies {
+		all = append(all, local...)
+	}
 	sort.Slice(all, func(i, j int) bool { return all[i] < all[j] })
 	p50, p95, p99 := percentile(all, .50), percentile(all, .95), percentile(all, .99)
 
 	total := acceptedCount + rejectedCount
 	errorRate := 0.0
-	if total > 0 { errorRate = float64(rejectedCount) / float64(total) }
+	if total > 0 {
+		errorRate = float64(rejectedCount) / float64(total)
+	}
 	actualTPS := float64(committed) / elapsed.Seconds()
 	saturated := errorRate > maxError || (maxP99 > 0 && time.Duration(p99)*time.Microsecond > maxP99) || actualTPS < float64(target)*0.90
 
@@ -144,9 +158,16 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid benchmark configuration")
 		os.Exit(2)
 	}
-	if *startTPS == 0 { *startTPS = *workers * 100 }
-	if *maxTPS == 0 { *maxTPS = int(float64(*startTPS) * math.Pow(*growth, float64(*stages-1))) }
-	if *maxTPS < *startTPS { fmt.Fprintln(os.Stderr, "max-tps must be >= start-tps"); os.Exit(2) }
+	if *startTPS == 0 {
+		*startTPS = *workers * 100
+	}
+	if *maxTPS == 0 {
+		*maxTPS = int(float64(*startTPS) * math.Pow(*growth, float64(*stages-1)))
+	}
+	if *maxTPS < *startTPS {
+		fmt.Fprintln(os.Stderr, "max-tps must be >= start-tps")
+		os.Exit(2)
+	}
 
 	out := benchmarkResult{Mode: "adaptive-ramp", Workers: *workers, BatchSize: *batch, FlushMS: int(*flush / time.Millisecond), LatencySampleRate: *sampleRate, StartTPS: *startTPS, MaxTPS: *maxTPS, GrowthFactor: *growth, StageDuration: stageDuration.Seconds()}
 	target, lastGood := *startTPS, 0
@@ -154,13 +175,27 @@ func main() {
 		result := runStage(target, *stageDuration, *workers, *batch, *flush, *maxError, *maxP99, *sampleRate)
 		out.Stages = append(out.Stages, result)
 		fmt.Printf("stage=%d target=%d actual=%.0f committed=%d submit_p99=%dus samples=%d errors=%.2f%% saturated=%t gc=%d alloc=%dMB goroutines=%d\n", stage+1, result.TargetTPS, result.ActualTPS, result.Committed, result.P99Us, result.Sampled, result.ErrorRate*100, result.Saturated, result.Runtime.NumGC, result.Runtime.TotalAllocMB, result.Runtime.Goroutines)
-		if result.Saturated { out.StopReason = "saturation threshold reached"; break }
+		if result.Saturated {
+			out.StopReason = "saturation threshold reached"
+			break
+		}
 		lastGood = result.TargetTPS
-		next := int(math.Ceil(float64(target) * *growth)); if next <= target { next = target + 1 }; target = next
+		next := int(math.Ceil(float64(target) * *growth))
+		if next <= target {
+			next = target + 1
+		}
+		target = next
 	}
-	if out.StopReason == "" { out.StopReason = "ramp limit reached" }
+	if out.StopReason == "" {
+		out.StopReason = "ramp limit reached"
+	}
 	out.PeakSustainable = lastGood
 	encoded, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Println(string(encoded))
-	if *jsonOut != "" { if err := os.WriteFile(*jsonOut, append(encoded, '\n'), 0644); err != nil { fmt.Fprintf(os.Stderr, "write JSON: %v\n", err); os.Exit(1) } }
+	if *jsonOut != "" {
+		if err := os.WriteFile(*jsonOut, append(encoded, '\n'), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "write JSON: %v\n", err)
+			os.Exit(1)
+		}
+	}
 }
