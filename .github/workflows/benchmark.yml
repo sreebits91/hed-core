@@ -74,14 +74,19 @@ jobs:
           docker pull yugabytedb/yugabyte:latest
           docker run -d --name hed-yugabyte -p 5433:5433 --entrypoint /bin/bash yugabytedb/yugabyte:latest \
             -lc 'bin/yugabyted start --daemon=false --ui=false --callhome=false --advertise_address=127.0.0.1'
-          for i in {1..90}; do
-            if docker exec hed-yugabyte bash -lc 'echo > /dev/tcp/127.0.0.1/5433' 2>/dev/null; then
-              echo "Yugabyte YSQL is ready"
+          for i in {1..120}; do
+            if docker exec hed-yugabyte bash -lc 'bin/ysqlsh -h 127.0.0.1 -p 5433 -U yugabyte -d yugabyte -c "select 1" >/dev/null 2>&1'; then
+              echo "Yugabyte YSQL is accepting queries"
               exit 0
             fi
-            docker logs hed-yugabyte 2>&1 | tail -20 || true
+            if ! docker inspect -f '{{.State.Running}}' hed-yugabyte 2>/dev/null | grep -q true; then
+              echo "Yugabyte container exited unexpectedly"
+              docker logs hed-yugabyte
+              exit 1
+            fi
             sleep 2
           done
+          echo "Timed out waiting for Yugabyte YSQL"
           docker logs hed-yugabyte
           exit 1
       - name: Run Yugabyte persistence benchmark
