@@ -23,11 +23,12 @@ type HLFCommitter struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
+	stopOnce  sync.Once
 }
 
 func NewHLFCommitter(cfg BatchConfig) *HLFCommitter {
 	if cfg.MaxBatchSize <= 0 {
-		cfg.MaxBatchSize = 2000 // 2k txs per HLF block batch
+		cfg.MaxBatchSize = 2000
 	}
 	if cfg.FlushTimeout <= 0 {
 		cfg.FlushTimeout = 10 * time.Millisecond
@@ -37,9 +38,8 @@ func NewHLFCommitter(cfg BatchConfig) *HLFCommitter {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-
 	c := &HLFCommitter{
-		txQueue: make(chan *engine.TxPayload, 200000), // High-capacity lock-free buffer
+		txQueue: make(chan *engine.TxPayload, 200000),
 		cfg:     cfg,
 		ctx:     ctx,
 		cancel:  cancel,
@@ -52,63 +52,74 @@ func NewHLFCommitter(cfg BatchConfig) *HLFCommitter {
 func (c *HLFCommitter) startWorkers() {
 	for i := 0; i < c.cfg.WorkerCount; i++ {
 		c.wg.Add(1)
-		go c.workerLoop(i)
+		go c.workerLoop()
 	}
 }
 
-func (c *HLFCommitter) workerLoop(workerID int) {
+func (c *HLFCommitter) workerLoop() {
 	defer c.wg.Done()
 
 	batch := make([]*engine.TxPayload, 0, c.cfg.MaxBatchSize)
 	ticker := time.NewTicker(c.cfg.FlushTimeout)
 	defer ticker.Stop()
 
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		c.flushBatch(batch)
+		batch = batch[:0]
+	}
+
 	for {
 		select {
 		case <-c.ctx.Done():
-			if len(batch) > 0 {
-				c.flushBatch(batch)
-			}
+			flush()
 			return
-
-		case tx, ok := <-c.txQueue:
-			if !ok {
-				if len(batch) > 0 {
-					c.flushBatch(batch)
-				}
+		case tx := <-c.txQueue:
+			if tx == nil {
+				flush()
 				return
 			}
 			batch = append(batch, tx)
 			if len(batch) >= c.cfg.MaxBatchSize {
-				c.flushBatch(batch)
-				batch = make([]*engine.TxPayload, 0, c.cfg.MaxBatchSize)
+				flush()
 			}
-
 		case <-ticker.C:
-			if len(batch) > 0 {
-				c.flushBatch(batch)
-				batch = make([]*engine.TxPayload, 0, c.cfg.MaxBatchSize)
-			}
+			flush()
 		}
 	}
 }
 
-// SubmitTx accepts transactions non-blockingly to maintain 100k+ TPS pipeline speeds
+// SubmitTx accepts transactions without blocking the caller.
+// Once Stop begins, submissions are rejected rather than panicking on a closed channel.
 func (c *HLFCommitter) SubmitTx(tx *engine.TxPayload) bool {
+	if tx == nil {
+		atomic.AddUint64(&c.failed, 1)
+		return false
+	}
+
 	select {
+	case <-c.ctx.Done():
+		atomic.AddUint64(&c.failed, 1)
+		return false
+	default:
+	}
+
+	select {
+	case <-c.ctx.Done():
+		atomic.AddUint64(&c.failed, 1)
+		return false
 	case c.txQueue <- tx:
 		return true
 	default:
-		// Queue full overflow backup metric
 		atomic.AddUint64(&c.failed, 1)
 		return false
 	}
 }
 
 func (c *HLFCommitter) flushBatch(batch []*engine.TxPayload) {
-	// Async Block Ordering & LevelDB State Commit
-	count := uint64(len(batch))
-	atomic.AddUint64(&c.committed, count)
+	atomic.AddUint64(&c.committed, uint64(len(batch)))
 }
 
 func (c *HLFCommitter) TotalCommitted() uint64 {
@@ -120,7 +131,8 @@ func (c *HLFCommitter) TotalFailed() uint64 {
 }
 
 func (c *HLFCommitter) Stop() {
-	c.cancel()
-	close(c.txQueue)
-	c.wg.Wait()
+	c.stopOnce.Do(func() {
+		c.cancel()
+		c.wg.Wait()
+	})
 }
