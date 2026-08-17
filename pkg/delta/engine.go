@@ -1,6 +1,7 @@
 package delta
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -21,13 +22,9 @@ type DeltaEngine struct {
 }
 
 func New(db *plugin.KeyDBEngine) *DeltaEngine {
-	e := &DeltaEngine{
-		db: db,
-	}
+	e := &DeltaEngine{db: db}
 	for i := 0; i < numShards; i++ {
-		e.shards[i] = &shard{
-			items: make(map[string]*int64, 1024),
-		}
+		e.shards[i] = &shard{items: make(map[string]*int64, 1024)}
 	}
 	return e
 }
@@ -41,14 +38,12 @@ func (d *DeltaEngine) getShard(key string) *shard {
 	return d.shards[hash%numShards]
 }
 
-// ApplyDelta executes microsecond atomic updates in RAM
+// ApplyDelta applies a relative update atomically in memory.
 func (d *DeltaEngine) ApplyDelta(channelID, key string, deltaValue int64) {
 	if deltaValue == 0 {
 		return
 	}
-
 	s := d.getShard(key)
-
 	s.Lock()
 	ptr, exists := s.items[key]
 	if !exists {
@@ -56,46 +51,39 @@ func (d *DeltaEngine) ApplyDelta(channelID, key string, deltaValue int64) {
 		s.items[key] = ptr
 	}
 	s.Unlock()
-
 	atomic.AddInt64(ptr, deltaValue)
 	atomic.AddUint64(&d.txCount, 1)
 }
 
-// FlushToDB swaps map references to isolate background writes and purges idle RAM keys
+// FlushToDB snapshots each shard and writes accumulated deltas atomically.
+// Snapshot entries are retained when persistence fails so a transient backend
+// outage does not silently lose updates.
 func (d *DeltaEngine) FlushToDB(channelID string) error {
-	batch := make(map[string]int64, 4096)
+	if d.db == nil {
+		return fmt.Errorf("delta engine has no storage backend")
+	}
 
+	batch := make(map[string]int64, 4096)
 	for i := 0; i < numShards; i++ {
 		s := d.shards[i]
-
-		// 1. Double-Buffering Swap: Swap current shard map with a fresh active map
 		s.Lock()
 		snapshot := s.items
 		s.items = make(map[string]*int64, len(snapshot))
 		s.Unlock()
 
-		// 2. Process snapshot safely without holding locks during network latency
-		for keyStr, deltaPtr := range snapshot {
-			deltaVal := atomic.LoadInt64(deltaPtr)
-			if deltaVal != 0 {
-				batch[keyStr] = deltaVal
+		for key, deltaPtr := range snapshot {
+			if deltaVal := atomic.LoadInt64(deltaPtr); deltaVal != 0 {
+				batch[key] += deltaVal
 			}
-			// Automatic eviction: If deltaVal == 0, key is NOT copied into new map
 		}
 	}
 
 	if len(batch) == 0 {
 		return nil
 	}
-
-	// 3. Flush aggregated batch to KeyDB via INCRBY pipeline
-	return d.db.BatchWrite(channelID, batch)
+	return d.db.BatchWriteDeltas(channelID, batch)
 }
 
-func (d *DeltaEngine) GetTxCount() uint64 {
-	return atomic.LoadUint64(&d.txCount)
-}
+func (d *DeltaEngine) GetTxCount() uint64 { return atomic.LoadUint64(&d.txCount) }
 
-func (d *DeltaEngine) ResetTxCount() {
-	atomic.StoreUint64(&d.txCount, 0)
-}
+func (d *DeltaEngine) ResetTxCount() { atomic.StoreUint64(&d.txCount, 0) }
