@@ -21,7 +21,7 @@ func NewYugabyteEngine(connString string) (*YugabyteEngine, error) {
 		return nil, fmt.Errorf("failed to parse connection config: %w", err)
 	}
 	config.MaxConns = 128
-	config.MinConns = 32
+	config.MinConns = 1
 	config.MaxConnIdleTime = 5 * time.Minute
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)
@@ -34,16 +34,31 @@ func NewYugabyteEngine(connString string) (*YugabyteEngine, error) {
 func (y *YugabyteEngine) Name() string { return "YugabyteDB-Distributed-SQL" }
 
 func (y *YugabyteEngine) Init(config map[string]string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := y.pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS channel_states (
-			channel_id VARCHAR(64),
-			account_id VARCHAR(64),
-			balance BIGINT,
-			PRIMARY KEY (channel_id, account_id)
-		);`)
-	return err
+	const attempts = 12
+	for attempt := 1; attempt <= attempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := y.pool.Ping(ctx)
+		if err == nil {
+			_, err = y.pool.Exec(ctx, `
+				CREATE TABLE IF NOT EXISTS channel_states (
+					channel_id VARCHAR(64),
+					account_id VARCHAR(64),
+					balance BIGINT,
+					PRIMARY KEY (channel_id, account_id)
+				);`)
+			cancel()
+			if err == nil {
+				return nil
+			}
+		} else {
+			cancel()
+		}
+		if attempt == attempts {
+			return fmt.Errorf("Yugabyte did not become query-ready after %d attempts: %w", attempts, err)
+		}
+		time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+	}
+	return nil
 }
 
 func (y *YugabyteEngine) GetState(channelID, key string) ([]byte, error) {
@@ -78,7 +93,6 @@ func (y *YugabyteEngine) PutState(channelID, key string, value []byte) error {
 	return err
 }
 
-// BatchWrite performs ordinary state replacement.
 func (y *YugabyteEngine) BatchWrite(channelID string, updates map[string][]byte) error {
 	if len(updates) == 0 {
 		return nil
@@ -111,7 +125,6 @@ func (y *YugabyteEngine) BatchWrite(channelID string, updates map[string][]byte)
 	return nil
 }
 
-// BatchWriteDeltas atomically accumulates relative balance changes.
 func (y *YugabyteEngine) BatchWriteDeltas(channelID string, updates map[string]int64) error {
 	if len(updates) == 0 {
 		return nil
