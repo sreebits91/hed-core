@@ -38,7 +38,8 @@ func (d *DeltaEngine) getShard(key string) *shard {
 	return d.shards[hash%numShards]
 }
 
-// ApplyDelta applies a relative update atomically in memory.
+// ApplyDelta applies the update while holding the shard lock so a concurrent
+// flush cannot detach the key between pointer creation and the atomic update.
 func (d *DeltaEngine) ApplyDelta(channelID, key string, deltaValue int64) {
 	if deltaValue == 0 {
 		return
@@ -50,14 +51,13 @@ func (d *DeltaEngine) ApplyDelta(channelID, key string, deltaValue int64) {
 		ptr = new(int64)
 		s.items[key] = ptr
 	}
-	s.Unlock()
 	atomic.AddInt64(ptr, deltaValue)
+	s.Unlock()
 	atomic.AddUint64(&d.txCount, 1)
 }
 
-// FlushToDB snapshots each shard and writes accumulated deltas atomically.
-// Snapshot entries are retained when persistence fails so a transient backend
-// outage does not silently lose updates.
+// FlushToDB snapshots each shard. If persistence fails, the snapshot is
+// merged back into the live maps so updates are not silently lost.
 func (d *DeltaEngine) FlushToDB(channelID string) error {
 	if d.db == nil {
 		return fmt.Errorf("delta engine has no storage backend")
@@ -81,7 +81,27 @@ func (d *DeltaEngine) FlushToDB(channelID string) error {
 	if len(batch) == 0 {
 		return nil
 	}
-	return d.db.BatchWriteDeltas(channelID, batch)
+	if err := d.db.BatchWriteDeltas(channelID, batch); err != nil {
+		for i := 0; i < numShards; i++ {
+			// Requeue by key. Concurrent writes are merged rather than overwritten.
+			s := d.shards[i]
+			s.Lock()
+			for key, value := range batch {
+				if d.getShard(key) != s {
+					continue
+				}
+				ptr := s.items[key]
+				if ptr == nil {
+					ptr = new(int64)
+					s.items[key] = ptr
+				}
+				atomic.AddInt64(ptr, value)
+			}
+			s.Unlock()
+		}
+		return fmt.Errorf("persisting delta batch: %w", err)
+	}
+	return nil
 }
 
 func (d *DeltaEngine) GetTxCount() uint64 { return atomic.LoadUint64(&d.txCount) }
