@@ -1,4 +1,4 @@
-name: HED 100K Benchmark
+name: HED Performance Ladder
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       transactions:
-        description: Transactions per run
+        description: Logical transactions per run
         required: true
         default: "100000"
       workers:
@@ -22,7 +22,8 @@ env:
   BENCH_WORKERS: "256"
 
 jobs:
-  benchmark:
+  core:
+    name: In-memory Delta
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +31,71 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Run 100K throughput benchmark
+      - name: Benchmark 100K
         run: go test ./pkg/benchmark -run '^$' -bench BenchmarkDeltaEngine100K -benchtime=1x -count=1 -timeout=5m
-      - name: Run exact 100K correctness test
+      - name: Exact 100K correctness
         run: go test ./pkg/benchmark -run TestRun256WorkerBenchmarkReachesExactTarget -count=1 -timeout=5m
+
+  keydb:
+    name: KeyDB persistence
+    runs-on: ubuntu-latest
+    services:
+      keydb:
+        image: eqalpha/keydb:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "keydb-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run KeyDB persistence tests
+        run: go test ./pkg/benchmark -run 'TestKeyDB|TestRunStorageBenchmark' -count=1 -timeout=10m
+        env:
+          HED_KEYDB_ADDR: localhost:6379
+
+  yugabyte:
+    name: Yugabyte persistence
+    runs-on: ubuntu-latest
+    services:
+      yugabyte:
+        image: yugabytedb/yugabyte:latest
+        ports:
+          - 5433:5433
+        options: >-
+          --health-cmd "ysqlsh -h 127.0.0.1 -p 5433 -c 'select 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run Yugabyte persistence tests
+        run: go test ./pkg/benchmark -run 'TestYugabyte|TestRunStorageBenchmark' -count=1 -timeout=10m
+        env:
+          HED_YUGABYTE_URL: postgres://yugabyte:yugabyte@localhost:5433/yugabyte?sslmode=disable
+
+  summary:
+    name: Performance interpretation
+    needs: [core, keydb, yugabyte]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain the ladder
+        run: |
+          echo "HED performance ladder:"
+          echo "1) In-memory Delta = algorithmic ceiling"
+          echo "2) KeyDB = networked key/value persistence"
+          echo "3) Yugabyte = distributed SQL persistence"
+          echo "4) Fabric = ordering/endorsement/commit path"
+          echo "5) Full E2E = production-facing measurement"
+          echo "A passing core benchmark must never be reported as E2E TPS."
