@@ -15,6 +15,9 @@ type KeyDBEngine struct {
 }
 
 func NewKeyDBEngine(addr string, poolSize int) *KeyDBEngine {
+	if poolSize <= 0 {
+		poolSize = 128
+	}
 	client := redis.NewClient(&redis.Options{
 		Addr:         addr,
 		PoolSize:     poolSize,
@@ -22,15 +25,10 @@ func NewKeyDBEngine(addr string, poolSize int) *KeyDBEngine {
 		ReadTimeout:  3 * time.Second,
 		WriteTimeout: 3 * time.Second,
 	})
-	return &KeyDBEngine{
-		client: client,
-		addr:   addr,
-	}
+	return &KeyDBEngine{client: client, addr: addr}
 }
 
-func (k *KeyDBEngine) Name() string {
-	return "KeyDB-Production-Incr"
-}
+func (k *KeyDBEngine) Name() string { return "KeyDB-Production-Incr" }
 
 func (k *KeyDBEngine) Init(config map[string]string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -38,75 +36,97 @@ func (k *KeyDBEngine) Init(config map[string]string) error {
 	return k.client.Ping(ctx).Err()
 }
 
-func (k *KeyDBEngine) GetState(channelID string, key string) ([]byte, error) {
-	ctx := context.Background()
-	fullKey := fmt.Sprintf("%s:%s", channelID, key)
-	val, err := k.client.Get(ctx, fullKey).Bytes()
+func (k *KeyDBEngine) GetState(channelID, key string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	val, err := k.client.Get(ctx, fmt.Sprintf("%s:%s", channelID, key)).Bytes()
 	if err == redis.Nil {
 		return nil, nil
 	}
 	return val, err
 }
 
-func (k *KeyDBEngine) PutState(channelID string, key string, value []byte) error {
-	ctx := context.Background()
-	fullKey := fmt.Sprintf("%s:%s", channelID, key)
-	return k.client.Set(ctx, fullKey, value, 0).Err()
+func (k *KeyDBEngine) PutState(channelID, key string, value []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return k.client.Set(ctx, fmt.Sprintf("%s:%s", channelID, key), value, 0).Err()
 }
 
-// BatchWrite executes INCRBY operations in 1,000-command pipeline chunks with exponential backoff retries
-func (k *KeyDBEngine) BatchWrite(channelID string, updates map[string]int64) error {
+// BatchWrite performs ordinary state replacement in pipeline chunks.
+func (k *KeyDBEngine) BatchWrite(channelID string, updates map[string][]byte) error {
 	if len(updates) == 0 {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	ctx := context.Background()
 	pipe := k.client.Pipeline()
 	count := 0
-
-	for key, val := range updates {
-		if val == 0 {
-			continue
-		}
-
-		fullKey := channelID + ":" + key
-		// INCRBY ensures relative updates accumulate safely without overwriting state
-		pipe.IncrBy(ctx, fullKey, val)
+	for key, value := range updates {
+		pipe.Set(ctx, channelID+":"+key, value, 0)
 		count++
-
 		if count%1000 == 0 {
 			if err := k.execWithRetry(ctx, pipe); err != nil {
-				return fmt.Errorf("pipeline chunk failed after retries: %w", err)
+				return fmt.Errorf("state pipeline chunk failed: %w", err)
 			}
 			pipe = k.client.Pipeline()
 		}
 	}
-
-	if count > 0 && count%1000 != 0 {
+	if count%1000 != 0 {
 		if err := k.execWithRetry(ctx, pipe); err != nil {
-			return fmt.Errorf("final pipeline chunk failed after retries: %w", err)
+			return fmt.Errorf("final state pipeline chunk failed: %w", err)
 		}
 	}
-
 	return nil
 }
 
-// execWithRetry handles network failures with 3 retry attempts using exponential backoff
-func (k *KeyDBEngine) execWithRetry(ctx context.Context, pipe redis.Pipeliner) error {
-	maxRetries := 3
-	backoff := 10 * time.Millisecond
+// BatchWriteDeltas atomically accumulates relative balance changes with INCRBY.
+func (k *KeyDBEngine) BatchWriteDeltas(channelID string, updates map[string]int64) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	for i := 0; i < maxRetries; i++ {
-		_, err := pipe.Exec(ctx)
-		if err == nil {
-			return nil
+	pipe := k.client.Pipeline()
+	count := 0
+	for key, value := range updates {
+		if value == 0 {
+			continue
 		}
+		pipe.IncrBy(ctx, channelID+":"+key, value)
+		count++
+		if count%1000 == 0 {
+			if err := k.execWithRetry(ctx, pipe); err != nil {
+				return fmt.Errorf("delta pipeline chunk failed: %w", err)
+			}
+			pipe = k.client.Pipeline()
+		}
+	}
+	if count%1000 != 0 {
+		if err := k.execWithRetry(ctx, pipe); err != nil {
+			return fmt.Errorf("final delta pipeline chunk failed: %w", err)
+		}
+	}
+	return nil
+}
 
-		log.Printf("⚠️ [STORAGE RETRY] KeyDB pipeline write failed (attempt %d/%d): %v", i+1, maxRetries, err)
-		time.Sleep(backoff)
+func (k *KeyDBEngine) execWithRetry(ctx context.Context, pipe redis.Pipeliner) error {
+	const maxRetries = 3
+	backoff := 10 * time.Millisecond
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if _, err := pipe.Exec(ctx); err == nil {
+			return nil
+		} else {
+			log.Printf("[STORAGE RETRY] KeyDB pipeline failed (attempt %d/%d): %v", attempt, maxRetries, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
 		backoff *= 2
 	}
-
 	return fmt.Errorf("exceeded max pipeline retry attempts")
 }
 
