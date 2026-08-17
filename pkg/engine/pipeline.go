@@ -45,6 +45,10 @@ type Pipeline struct {
 }
 
 func NewPipeline(db plugin.StateEngine, initialShards int) *Pipeline {
+	if initialShards <= 0 {
+		initialShards = 1
+	}
+
 	engName := "KeyDB"
 	if db != nil {
 		engName = db.Name()
@@ -66,27 +70,39 @@ func (p *Pipeline) SetStorageEngine(db plugin.StateEngine) {
 }
 
 func (p *Pipeline) SetShards(count int) {
+	if count <= 0 {
+		return
+	}
 	p.shards = count
 	p.EmitEvent(EventSys, "", "", fmt.Sprintf("Updated sharded gateway topology to %d channels", count), 0)
 }
 
 func (p *Pipeline) SubmitTransaction(tx *TxPayload) (string, int64, error) {
 	start := time.Now()
-	
+	if tx == nil {
+		atomic.AddUint64(&p.failed, 1)
+		return "", 0, fmt.Errorf("transaction payload is nil")
+	}
+
+	shardCount := p.shards
+	if shardCount <= 0 {
+		shardCount = 1
+	}
+
 	shardIdx := 0
 	if len(tx.TxUUID) > 0 {
-		shardIdx = int(tx.TxUUID[0]) % p.shards
+		shardIdx = int(tx.TxUUID[0]) % shardCount
 	}
 	shardName := fmt.Sprintf("shard-%d", shardIdx)
 
 	if p.db != nil {
 		key := fmt.Sprintf("acc:%s", tx.AccountID)
 		val := []byte(fmt.Sprintf("%d", tx.Amount))
-		
+
 		err := p.db.PutState(shardName, key, val)
 		if err != nil {
 			atomic.AddUint64(&p.failed, 1)
-			p.EmitEvent(EventErr, shardName, tx.TxUUID, fmt.Sprintf("Execution failed on engine [%s]: %v", p.engineName, err), 0)
+			p.EmitEvent(EventErr, shardName, tx.TxUUID, fmt.Sprintf("Execution failed on engine [%s]: %v", p.EngineName(), err), 0)
 			return shardName, time.Since(start).Microseconds(), err
 		}
 	}
@@ -94,9 +110,8 @@ func (p *Pipeline) SubmitTransaction(tx *TxPayload) (string, int64, error) {
 	ackLatUs := time.Since(start).Microseconds()
 	committedCount := atomic.AddUint64(&p.committed, 1)
 
-	// Sample stream output every 1000 txs to prevent terminal & channel lock contention at 100k+ TPS
 	if committedCount%1000 == 0 {
-		p.EmitEvent(EventCommit, shardName, tx.TxUUID, fmt.Sprintf("Persisted state [%s] balance=%d via %s", tx.AccountID, tx.Amount, p.engineName), ackLatUs)
+		p.EmitEvent(EventCommit, shardName, tx.TxUUID, fmt.Sprintf("Persisted state [%s] balance=%d via %s", tx.AccountID, tx.Amount, p.EngineName()), ackLatUs)
 	}
 
 	return shardName, ackLatUs, nil
@@ -111,6 +126,8 @@ func (p *Pipeline) TotalFailed() uint64 {
 }
 
 func (p *Pipeline) EngineName() string {
+	p.subMux.RLock()
+	defer p.subMux.RUnlock()
 	return p.engineName
 }
 
@@ -124,9 +141,11 @@ func (p *Pipeline) SubscribeEvents() chan Event {
 
 func (p *Pipeline) UnsubscribeEvents(ch chan Event) {
 	p.subMux.Lock()
-	delete(p.subscribers, ch)
+	if _, ok := p.subscribers[ch]; ok {
+		delete(p.subscribers, ch)
+		close(ch)
+	}
 	p.subMux.Unlock()
-	close(ch)
 }
 
 func (p *Pipeline) EmitEvent(typ EventType, shard, txUUID, msg string, latUs int64) {
