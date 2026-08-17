@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -45,6 +46,38 @@ func (y *YugabyteEngine) Init(config map[string]string) error {
 	return err
 }
 
+func (y *YugabyteEngine) GetState(channelID, key string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var balance int64
+	err := y.pool.QueryRow(ctx,
+		`SELECT balance FROM channel_states WHERE channel_id = $1 AND account_id = $2`,
+		channelID, key,
+	).Scan(&balance)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return []byte(strconv.FormatInt(balance, 10)), nil
+}
+
+func (y *YugabyteEngine) PutState(channelID, key string, value []byte) error {
+	balance, err := strconv.ParseInt(string(value), 10, 64)
+	if err != nil {
+		return fmt.Errorf("state value for %s is not an int64: %w", key, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err = y.pool.Exec(ctx, `
+		INSERT INTO channel_states (channel_id, account_id, balance)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (channel_id, account_id)
+		DO UPDATE SET balance = EXCLUDED.balance;`, channelID, key, balance)
+	return err
+}
+
 // BatchWrite performs ordinary state replacement.
 func (y *YugabyteEngine) BatchWrite(channelID string, updates map[string][]byte) error {
 	if len(updates) == 0 {
@@ -55,11 +88,15 @@ func (y *YugabyteEngine) BatchWrite(channelID string, updates map[string][]byte)
 	batch := &pgx.Batch{}
 	count := 0
 	for key, value := range updates {
+		balance, err := strconv.ParseInt(string(value), 10, 64)
+		if err != nil {
+			return fmt.Errorf("state value for %s is not an int64: %w", key, err)
+		}
 		batch.Queue(`
 			INSERT INTO channel_states (channel_id, account_id, balance)
 			VALUES ($1, $2, $3)
 			ON CONFLICT (channel_id, account_id)
-			DO UPDATE SET balance = EXCLUDED.balance;`, channelID, key, value)
+			DO UPDATE SET balance = EXCLUDED.balance;`, channelID, key, balance)
 		count++
 		if count%500 == 0 {
 			if err := y.sendBatchWithRetry(ctx, batch); err != nil {
