@@ -39,3 +39,14 @@ func TestRunStorageBenchmarkAccountsEverySuccessfulTransaction(t *testing.T) {
 		t.Fatal("expected positive TPS")
 	}
 }
+
+func TestRunStorageBenchmarkExactRemainder(t *testing.T) {
+	db := &memoryStateEngine{}
+	result := RunStorageBenchmark(context.Background(), db, 100003, 256, 100)
+	if result.Transactions != 100003 {
+		t.Fatalf("transactions=%d, want 100003", result.Transactions)
+	}
+	if db.items != 100003 {
+		t.Fatalf("persisted=%d, want 100003", db.items)
+	}
+}
