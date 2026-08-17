@@ -37,8 +37,12 @@ func TestHLFServerLogsExposeTransactionEvents(t *testing.T) {
 	if len(payload.TxLogs) != 2 {
 		t.Fatalf("expected 2 tx logs, got %d", len(payload.TxLogs))
 	}
-	if payload.TxLogs[1]["message"] != "ACK account_1" {
-		t.Fatalf("unexpected tx log message: %s", payload.TxLogs[1]["message"])
+	// HLFServer intentionally returns newest events first.
+	if payload.TxLogs[0]["message"] != "ACK account_1" {
+		t.Fatalf("unexpected newest tx log message: %s", payload.TxLogs[0]["message"])
+	}
+	if payload.TxLogs[1]["message"] != "REQ account_1 payload=v" {
+		t.Fatalf("unexpected oldest tx log message: %s", payload.TxLogs[1]["message"])
 	}
 }
 
