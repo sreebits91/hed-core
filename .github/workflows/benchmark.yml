@@ -63,17 +63,6 @@ jobs:
   yugabyte:
     name: Yugabyte persistence
     runs-on: ubuntu-latest
-    services:
-      yugabyte:
-        image: yugabytedb/yugabyte:2.25.2.0-b381
-        ports:
-          - 5433:5433
-        options: >-
-          --entrypoint /home/yugabyte/bin/yugabyted
-          --health-cmd "bash -c 'echo > /dev/tcp/127.0.0.1/5433'"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -82,18 +71,26 @@ jobs:
           cache: true
       - name: Start Yugabyte single-node cluster
         run: |
-          docker exec "$(docker ps -q --filter ancestor=yugabytedb/yugabyte:2.25.2.0-b381 | head -1)" \
-            bin/yugabyted start --daemon=false --background=false --ui=false --callhome=false --advertise_address=127.0.0.1 &
-          for i in {1..60}; do
-            if docker exec "$(docker ps -q --filter ancestor=yugabytedb/yugabyte:2.25.2.0-b381 | head -1)" \
-              bash -lc 'echo > /dev/tcp/127.0.0.1/5433' 2>/dev/null; then exit 0; fi
+          docker pull yugabytedb/yugabyte:latest
+          docker run -d --name hed-yugabyte -p 5433:5433 --entrypoint /bin/bash yugabytedb/yugabyte:latest \
+            -lc 'bin/yugabyted start --daemon=false --ui=false --callhome=false --advertise_address=127.0.0.1'
+          for i in {1..90}; do
+            if docker exec hed-yugabyte bash -lc 'echo > /dev/tcp/127.0.0.1/5433' 2>/dev/null; then
+              echo "Yugabyte YSQL is ready"
+              exit 0
+            fi
+            docker logs hed-yugabyte 2>&1 | tail -20 || true
             sleep 2
           done
+          docker logs hed-yugabyte
           exit 1
       - name: Run Yugabyte persistence benchmark
         run: go test ./pkg/benchmark -run 'TestYugabyte|TestRunStorageBenchmark' -bench BenchmarkYugabyte100K -benchtime=1x -count=1 -timeout=15m -v
         env:
           HED_YUGABYTE_URL: postgres://yugabyte:yugabyte@localhost:5433/yugabyte?sslmode=disable
+      - name: Stop Yugabyte
+        if: always()
+        run: docker rm -f hed-yugabyte || true
 
   summary:
     name: Performance interpretation
