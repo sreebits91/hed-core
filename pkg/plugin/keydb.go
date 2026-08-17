@@ -52,7 +52,6 @@ func (k *KeyDBEngine) PutState(channelID, key string, value []byte) error {
 	return k.client.Set(ctx, fmt.Sprintf("%s:%s", channelID, key), value, 0).Err()
 }
 
-// BatchWrite performs ordinary state replacement in pipeline chunks.
 func (k *KeyDBEngine) BatchWrite(channelID string, updates map[string][]byte) error {
 	if len(updates) == 0 {
 		return nil
@@ -80,7 +79,6 @@ func (k *KeyDBEngine) BatchWrite(channelID string, updates map[string][]byte) er
 	return nil
 }
 
-// BatchWriteDeltas atomically accumulates relative balance changes with INCRBY.
 func (k *KeyDBEngine) BatchWriteDeltas(channelID string, updates map[string]int64) error {
 	if len(updates) == 0 {
 		return nil
