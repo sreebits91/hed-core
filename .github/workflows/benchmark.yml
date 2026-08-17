@@ -55,8 +55,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Run KeyDB persistence tests
-        run: go test ./pkg/benchmark -run 'TestKeyDB|TestRunStorageBenchmark' -count=1 -timeout=10m
+      - name: Run KeyDB persistence benchmark
+        run: go test ./pkg/benchmark -run 'TestKeyDB|TestRunStorageBenchmark' -bench BenchmarkKeyDB100K -benchtime=1x -count=1 -timeout=10m -v
         env:
           HED_KEYDB_ADDR: localhost:6379
 
@@ -65,22 +65,33 @@ jobs:
     runs-on: ubuntu-latest
     services:
       yugabyte:
-        image: yugabytedb/yugabyte:latest
+        image: yugabytedb/yugabyte:2.25.2.0-b381
         ports:
           - 5433:5433
         options: >-
-          --health-cmd "ysqlsh -h 127.0.0.1 -p 5433 -c 'select 1'"
+          --entrypoint /home/yugabyte/bin/yugabyted
+          --health-cmd "bash -c 'echo > /dev/tcp/127.0.0.1/5433'"
           --health-interval 5s
           --health-timeout 5s
-          --health-retries 30
+          --health-retries 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: Run Yugabyte persistence tests
-        run: go test ./pkg/benchmark -run 'TestYugabyte|TestRunStorageBenchmark' -count=1 -timeout=10m
+      - name: Start Yugabyte single-node cluster
+        run: |
+          docker exec "$(docker ps -q --filter ancestor=yugabytedb/yugabyte:2.25.2.0-b381 | head -1)" \
+            bin/yugabyted start --daemon=false --background=false --ui=false --callhome=false --advertise_address=127.0.0.1 &
+          for i in {1..60}; do
+            if docker exec "$(docker ps -q --filter ancestor=yugabytedb/yugabyte:2.25.2.0-b381 | head -1)" \
+              bash -lc 'echo > /dev/tcp/127.0.0.1/5433' 2>/dev/null; then exit 0; fi
+            sleep 2
+          done
+          exit 1
+      - name: Run Yugabyte persistence benchmark
+        run: go test ./pkg/benchmark -run 'TestYugabyte|TestRunStorageBenchmark' -bench BenchmarkYugabyte100K -benchtime=1x -count=1 -timeout=15m -v
         env:
           HED_YUGABYTE_URL: postgres://yugabyte:yugabyte@localhost:5433/yugabyte?sslmode=disable
 
@@ -99,3 +110,4 @@ jobs:
           echo "4) Fabric = ordering/endorsement/commit path"
           echo "5) Full E2E = production-facing measurement"
           echo "A passing core benchmark must never be reported as E2E TPS."
+          echo "100K TPS remains the production target."
