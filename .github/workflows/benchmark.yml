@@ -1,0 +1,36 @@
+name: HED 100K Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      transactions:
+        description: Transactions per run
+        required: true
+        default: "100000"
+      workers:
+        description: Worker count
+        required: true
+        default: "256"
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run benchmark
+        env:
+          BENCH_TX: ${{ inputs.transactions }}
+          BENCH_WORKERS: ${{ inputs.workers }}
+        run: |
+          go test ./pkg/benchmark -run '^$' -bench BenchmarkDeltaEngine100K -benchtime=1x -count=1 -timeout=5m
+          echo "Target transactions: ${BENCH_TX}"
+          echo "Target workers: ${BENCH_WORKERS}"
+      - name: Run exact 100K correctness test
+        run: go test ./pkg/benchmark -run TestRun256WorkerBenchmarkReachesExactTarget -count=1 -timeout=5m
