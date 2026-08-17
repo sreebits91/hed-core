@@ -5,8 +5,28 @@
 *.dll
 *.so
 *.dylib
+*.test
+*.out
+coverage.out
 
 # IDE & OS files
 .DS_Store
 .idea/
 .vscode/
+
+# Local configuration / secrets
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# Fabric local runtime material
+fabric-config/crypto-config/
+fabric-config/*/msp/
+fabric-config/*/tls/
+
+# Local databases / logs
+*.log
+*.db
+*.sqlite
