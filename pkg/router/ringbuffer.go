@@ -11,7 +11,7 @@ var (
 	ErrBufferEmpty = errors.New("ring buffer empty")
 )
 
-// TransactionPayload represents a single raw transaction payload in hed-core
+// TransactionPayload represents a single raw transaction payload in hed-core.
 type TransactionPayload struct {
 	TxID      string
 	Namespace string
@@ -19,92 +19,118 @@ type TransactionPayload struct {
 	Key       string
 }
 
-// slot wraps the data with CPU cache-line padding (64 bytes) to prevent false sharing
+// slot is a sequence-numbered cell. The sequence is the ownership protocol:
+// producers publish a fully written payload by advancing it to pos+1, while
+// consumers return ownership by advancing it to pos+size.
 type slot struct {
-	tx   TransactionPayload
-	_pad [64 - (unsafeSizeOfTxPayload % 64)]byte
+	seq atomic.Uint64
+	tx  TransactionPayload
 }
 
-const unsafeSizeOfTxPayload = 64 // Approximated cache boundary alignment
-
-// RingBuffer is a lock-free, bounded MPMC (Multi-Producer Multi-Consumer) ring buffer
+// RingBuffer is a bounded lock-free MPMC queue using per-slot sequence
+// numbers. Unlike a head/tail-only ring, a consumer can never observe a slot
+// before its producer has published the payload.
 type RingBuffer struct {
-	_pad0 [64]byte
-	head  atomic.Uint64 // Write sequence counter
-	_pad1 [64]byte
-	tail  atomic.Uint64 // Read sequence counter
-	_pad2 [64]byte
+	head  atomic.Uint64
+	tail  atomic.Uint64
 	mask  uint64
 	size  uint64
 	slots []slot
 }
 
-// NewRingBuffer initializes a RingBuffer. Size MUST be a power of 2 (e.g., 1024, 65536)
+// NewRingBuffer initializes a bounded queue. Capacity must be a power of two.
 func NewRingBuffer(capacity uint64) *RingBuffer {
 	if capacity == 0 || (capacity&(capacity-1)) != 0 {
 		panic("capacity must be a power of 2")
 	}
-	return &RingBuffer{
+
+	rb := &RingBuffer{
 		size:  capacity,
 		mask:  capacity - 1,
 		slots: make([]slot, capacity),
 	}
+	for i := uint64(0); i < capacity; i++ {
+		rb.slots[i].seq.Store(i)
+	}
+	return rb
 }
 
-// Push Enqueues a transaction using atomic Compare-And-Swap (CAS)
+// Push enqueues a transaction. It returns ErrBufferFull when no slot is
+// immediately available rather than blocking indefinitely.
 func (rb *RingBuffer) Push(tx TransactionPayload) error {
-	for {
-		head := rb.head.Load()
-		tail := rb.tail.Load()
+	for spins := 0; ; spins++ {
+		pos := rb.head.Load()
+		s := &rb.slots[pos&rb.mask]
+		seq := s.seq.Load()
+		dif := int64(seq - pos)
 
-		if head-tail >= rb.size {
+		if dif == 0 {
+			if rb.head.CompareAndSwap(pos, pos+1) {
+				s.tx = tx
+				s.seq.Store(pos + 1) // publish only after payload is complete
+				return nil
+			}
+		} else if dif < 0 {
 			return ErrBufferFull
 		}
 
-		if rb.head.CompareAndSwap(head, head+1) {
-			idx := head & rb.mask
-			rb.slots[idx].tx = tx
-			return nil
+		if spins&7 == 7 {
+			runtime.Gosched()
 		}
-		// Yield CPU thread to avoid spinning burn under high worker contention
-		runtime.Gosched()
 	}
 }
 
-// PopBatch Dequeues up to `maxBatch` transactions atomically without locking
+// PopBatch dequeues up to maxBatch transactions. Each consumer first claims a
+// published slot and only then reads its payload, preventing stale/unwritten
+// data under MPMC contention.
 func (rb *RingBuffer) PopBatch(maxBatch uint64) ([]TransactionPayload, error) {
-	for {
+	if maxBatch == 0 {
+		return nil, ErrBufferEmpty
+	}
+
+	batch := make([]TransactionPayload, 0, maxBatch)
+	for len(batch) < int(maxBatch) {
 		tail := rb.tail.Load()
-		head := rb.head.Load()
+		s := &rb.slots[tail&rb.mask]
+		seq := s.seq.Load()
+		dif := int64(seq - (tail + 1))
 
-		if tail >= head {
-			return nil, ErrBufferEmpty
-		}
-
-		available := head - tail
-		n := maxBatch
-		if available < n {
-			n = available
-		}
-
-		if rb.tail.CompareAndSwap(tail, tail+n) {
-			batch := make([]TransactionPayload, n)
-			for i := uint64(0); i < n; i++ {
-				idx := (tail + i) & rb.mask
-				batch[i] = rb.slots[idx].tx
+		if dif == 0 {
+			if !rb.tail.CompareAndSwap(tail, tail+1) {
+				runtime.Gosched()
+				continue
 			}
-			return batch, nil
+
+			batch = append(batch, s.tx)
+			// Mark this cell available to the producer that owns the next
+			// generation of this position.
+			s.seq.Store(tail + rb.size)
+			continue
+		}
+
+		if dif < 0 {
+			break
 		}
 		runtime.Gosched()
 	}
+
+	if len(batch) == 0 {
+		return nil, ErrBufferEmpty
+	}
+	return batch, nil
 }
 
-// Length returns current unconsumed items count
+// Length is an approximate instantaneous occupancy. Under concurrent MPMC
+// access it is a diagnostic value, not a synchronization primitive.
 func (rb *RingBuffer) Length() uint64 {
 	head := rb.head.Load()
 	tail := rb.tail.Load()
-	if head >= tail {
-		return head - tail
+	if head < tail {
+		return 0
 	}
-	return 0
+	length := head - tail
+	if length > rb.size {
+		return rb.size
+	}
+	return length
 }
