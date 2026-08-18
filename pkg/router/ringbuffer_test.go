@@ -2,6 +2,7 @@ package router
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -33,20 +34,22 @@ func TestRingBufferFIFO(t *testing.T) {
 
 func TestRingBufferMPMC(t *testing.T) {
 	const (
-		producers = 16
-		consumers = 16
+		producers   = 16
+		consumers   = 16
 		perProducer = 2000
 	)
 
 	rb := NewRingBuffer(1024)
 	seen := make(map[string]bool, producers*perProducer)
 	var seenMu sync.Mutex
-	var wg sync.WaitGroup
+	var producerWG sync.WaitGroup
+	var consumerWG sync.WaitGroup
+	var producersDone atomic.Bool
 
 	for p := 0; p < producers; p++ {
-		wg.Add(1)
+		producerWG.Add(1)
 		go func(producer int) {
-			defer wg.Done()
+			defer producerWG.Done()
 			for i := 0; i < perProducer; i++ {
 				tx := TransactionPayload{TxID: formatID(producer, i), Payload: []byte{byte(i)}}
 				for {
@@ -58,21 +61,15 @@ func TestRingBufferMPMC(t *testing.T) {
 		}(p)
 	}
 
-	var consumersWG sync.WaitGroup
 	for c := 0; c < consumers; c++ {
-		consumersWG.Add(1)
+		consumerWG.Add(1)
 		go func() {
-			defer consumersWG.Done()
+			defer consumerWG.Done()
 			for {
 				batch, err := rb.PopBatch(32)
 				if err == ErrBufferEmpty {
-					if done := rb.Length(); done == 0 {
-						// Producers may still be running; check the producer
-						// waitgroup without holding any queue lock.
-						wg.Wait()
-						if rb.Length() == 0 {
-							return
-						}
+					if producersDone.Load() && rb.Length() == 0 {
+						return
 					}
 					continue
 				}
@@ -90,8 +87,9 @@ func TestRingBufferMPMC(t *testing.T) {
 		}()
 	}
 
-	wg.Wait()
-	consumersWG.Wait()
+	producerWG.Wait()
+	producersDone.Store(true)
+	consumerWG.Wait()
 
 	want := producers * perProducer
 	if len(seen) != want {
@@ -100,6 +98,5 @@ func TestRingBufferMPMC(t *testing.T) {
 }
 
 func formatID(producer, item int) string {
-	// Avoid fmt in the hot path; IDs only need to be unique for this test.
 	return string(rune(producer)) + ":" + string(rune(item))
 }
