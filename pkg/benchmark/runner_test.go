@@ -11,12 +11,9 @@ import (
 func TestRun256WorkerBenchmarkReachesExactTarget(t *testing.T) {
 	d := delta.New(nil)
 	result := Run256WorkerBenchmark(context.Background(), d, 100_000, 256)
-	if result.TotalTx != 100_000 {
-		t.Fatalf("total tx=%d, want 100000", result.TotalTx)
-	}
-	if result.TPS <= 0 {
-		t.Fatal("expected positive TPS")
-	}
+	if result.TotalTx != 100_000 { t.Fatalf("total tx=%d, want 100000", result.TotalTx) }
+	if result.TPS <= 0 { t.Fatal("expected positive TPS") }
+	if result.MaxQueueDepth <= 0 { t.Fatal("expected positive max queue depth") }
 }
 
 func TestRun256WorkerBenchmarkHonorsCancellation(t *testing.T) {
@@ -24,9 +21,7 @@ func TestRun256WorkerBenchmarkHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	result := Run256WorkerBenchmark(ctx, d, 100_000, 256)
-	if result.TotalTx != 0 {
-		t.Fatalf("cancelled benchmark committed %d transactions", result.TotalTx)
-	}
+	if result.TotalTx != 0 { t.Fatalf("cancelled benchmark committed %d transactions", result.TotalTx) }
 }
 
 func BenchmarkDeltaEngine100K(b *testing.B) {
