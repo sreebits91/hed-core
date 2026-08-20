@@ -2,7 +2,7 @@ package hlf
 
 import (
 	"context"
-	"strings"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -11,7 +11,7 @@ import (
 func TestRegisterListenerDoesNotBlockOnReplay(t *testing.T) {
 	d := NewDeployer(DeployOptions{})
 	for i := 0; i < 100; i++ {
-		d.broadcast("history-" + string(rune('a'+i%26)))
+		d.broadcast(fmt.Sprintf("history-%d", i))
 	}
 
 	ch := make(chan string)
@@ -34,13 +34,13 @@ func TestBroadcastConcurrentWithListenerRegistration(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
 			ch := make(chan string, 8)
 			d.RegisterListener(ch)
 			d.broadcast("message")
 			d.UnregisterListener(ch)
-		}(i)
+		}()
 	}
 
 	for i := 0; i < 100; i++ {
@@ -90,23 +90,19 @@ func TestChannelsResolution(t *testing.T) {
 	cases := []struct {
 		name string
 		opts DeployOptions
-		want string
+		want []string
 	}{
-		{name: "explicit channels", opts: DeployOptions{Channels: []string{"a", "b"}}, want: "[a b]"},
-		{name: "legacy channel", opts: DeployOptions{ChannelID: "legacy"}, want: "[legacy]"},
-		{name: "default", opts: DeployOptions{}, want: "[mychannel]"},
+		{name: "explicit channels", opts: DeployOptions{Channels: []string{"a", "b"}}, want: []string{"a", "b"}},
+		{name: "legacy channel", opts: DeployOptions{ChannelID: "legacy"}, want: []string{"legacy"}},
+		{name: "default", opts: DeployOptions{}, want: []string{DefaultChannelID}},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := dChannels(NewDeployer(tc.opts).channels())
-			if got != tc.want {
-				t.Fatalf("channels() = %s, want %s", got, tc.want)
+			got := NewDeployer(tc.opts).channels()
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("channels() = %v, want %v", got, tc.want)
 			}
 		})
 	}
-}
-
-func dChannels(channels []string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(strings.Join(channels, " ")), " ", " "), "\n", "")
 }
