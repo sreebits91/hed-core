@@ -1,0 +1,10 @@
+profile: extreme-throughput
+# Controlled benchmark profile only. Validate resource limits before production use.
+orderer:
+  batch_timeout: 100ms
+  max_message_count: 10000
+  preferred_max_bytes: 8388608
+  absolute_max_bytes: 33554432
+peer:
+  deliver_buffer_size: 1000
+  gateway_concurrency: 1024
