@@ -1,0 +1,9 @@
+profile: high-throughput
+orderer:
+  batch_timeout: 50ms
+  max_message_count: 5000
+  preferred_max_bytes: 4194304
+  absolute_max_bytes: 16777216
+peer:
+  deliver_buffer_size: 500
+  gateway_concurrency: 512
