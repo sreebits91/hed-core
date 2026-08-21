@@ -1,0 +1,38 @@
+name: HED CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go test -race ./...
+
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run benchmark
+        run: go test ./pkg/benchmark -bench=. -benchmem -count=3 -run '^$' | tee benchmark.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hed-benchmark
+          path: benchmark.txt

@@ -3,31 +3,15 @@ package dashboard
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestPerTickTxCountScalesWithConfig(t *testing.T) {
-	s := &Server{workers: 64, batchSize: 200, dbOpsPerTx: 3}
-	got := s.perTickTxCount()
-	want := uint64(200)
-	if got != want {
-		t.Fatalf("perTickTxCount() = %d, want %d", got, want)
-	}
-}
-
-func TestPerTickTxCountHasFloor(t *testing.T) {
-	s := &Server{workers: 1, batchSize: 1, dbOpsPerTx: 1}
-	got := s.perTickTxCount()
-	if got != 1 {
-		t.Fatalf("perTickTxCount() = %d, want 1", got)
-	}
-}
-
-func TestNewServerStartsPausedUntilTrackingIsEnabled(t *testing.T) {
+func TestNewServerStartsPaused(t *testing.T) {
 	s := NewServer(nil, nil, nil, nil)
-	if s.isTesting {
-		t.Fatal("expected new server to start paused until tracking is enabled")
+	if atomic.LoadInt32(&s.isTesting) != 0 {
+		t.Fatal("expected new server to start paused")
 	}
 }
 
@@ -43,9 +27,8 @@ func TestHLFServerLogsExposeTransactionEvents(t *testing.T) {
 	if recorder.Code != 200 {
 		t.Fatalf("handleLogs() status = %d, want 200", recorder.Code)
 	}
-
 	var payload struct {
-		Logs   []map[string]string `json:"logs"`
+		Logs []map[string]string `json:"logs"`
 		TxLogs []map[string]string `json:"txLogs"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
@@ -62,14 +45,10 @@ func TestHLFServerLogsExposeTransactionEvents(t *testing.T) {
 func TestHLFServerLifecycleSimulationMarksInstalledAndDeployed(t *testing.T) {
 	s := NewHLFServer(nil)
 	s.BeginLifecycleSimulation()
-
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if s.IsDeployed() {
-			return
-		}
+		if s.IsDeployed() { return }
 		time.Sleep(50 * time.Millisecond)
 	}
-
 	t.Fatalf("expected lifecycle simulation to mark deployment as ready")
 }

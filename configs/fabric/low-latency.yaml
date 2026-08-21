@@ -1,0 +1,9 @@
+profile: low-latency
+orderer:
+  batch_timeout: 10ms
+  max_message_count: 500
+  preferred_max_bytes: 1048576
+  absolute_max_bytes: 10485760
+peer:
+  deliver_buffer_size: 100
+  gateway_concurrency: 128
