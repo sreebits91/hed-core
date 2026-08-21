@@ -1,0 +1,36 @@
+profiles:
+  - low-latency
+  - balanced
+  - high-throughput
+  - extreme-throughput
+workloads:
+  logical_transactions:
+    - 10000
+    - 100000
+  workers:
+    - 64
+    - 128
+    - 256
+    - 512
+    - 1024
+  duration_seconds: 60
+metrics:
+  - logical_tps
+  - fabric_committed_tps
+  - p50_latency_ms
+  - p95_latency_ms
+  - p99_latency_ms
+  - p999_latency_ms
+  - endorsement_latency_ms
+  - ordering_latency_ms
+  - validation_commit_latency_ms
+  - block_transactions
+  - block_bytes
+  - peer_cpu_percent
+  - orderer_cpu_percent
+  - peer_memory_mb
+  - orderer_memory_mb
+  - network_mbps
+acceptance:
+  minimum_hed_logical_tps: 100000
+  stretch_hed_logical_tps: 500000
