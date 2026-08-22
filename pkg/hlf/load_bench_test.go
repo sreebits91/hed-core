@@ -2,6 +2,7 @@ package hlf
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,10 +19,20 @@ func BenchmarkHLFLoad100K(b *testing.B) { benchmarkHLFLoad(b, 100_000) }
 func BenchmarkHLFLoad250K(b *testing.B) { benchmarkHLFLoad(b, 250_000) }
 func BenchmarkHLFLoad500K(b *testing.B) { benchmarkHLFLoad(b, 500_000) }
 
+func percentileMicros(samples []int64, p float64) float64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	idx := int(float64(len(samples)-1) * p)
+	return float64(samples[idx])
+}
+
 func benchmarkHLFLoad(b *testing.B, target int) {
 	b.Helper()
 
 	const workers = 64
+	const latencySampleEvery = 100
 	cfg := BatchConfig{
 		MaxBatchSize: 2000,
 		FlushTimeout: 2 * time.Millisecond,
@@ -39,6 +50,8 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 
 		var next atomic.Int64
 		var rejected atomic.Uint64
+		latencies := make([]int64, 0, target/latencySampleEvery+workers)
+		var latencyMu sync.Mutex
 		var wg sync.WaitGroup
 		wg.Add(workers)
 
@@ -55,8 +68,18 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 						AccountID: "load-test",
 						Amount:    int64(i),
 					}
+					sample := i%latencySampleEvery == 0
+					var submitStart time.Time
+					if sample {
+						submitStart = time.Now()
+					}
 					if !c.SubmitTx(tx) {
 						rejected.Add(1)
+					}
+					if sample {
+						latencyMu.Lock()
+						latencies = append(latencies, time.Since(submitStart).Microseconds())
+						latencyMu.Unlock()
 					}
 				}
 			}(w)
@@ -82,6 +105,9 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 		b.ReportMetric(float64(target)/submitElapsed.Seconds(), "offered-tx/s")
 		b.ReportMetric(float64(dropped)/float64(target)*100, "drop-%")
 		b.ReportMetric(float64(failed)/float64(target)*100, "failure-%")
+		b.ReportMetric(percentileMicros(latencies, 0.50), "submit-p50-us")
+		b.ReportMetric(percentileMicros(latencies, 0.95), "submit-p95-us")
+		b.ReportMetric(percentileMicros(latencies, 0.99), "submit-p99-us")
 		b.ReportMetric(float64(c.QueueCapacity()), "queue-capacity")
 
 		if rejected.Load() != dropped {
