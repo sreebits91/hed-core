@@ -18,6 +18,10 @@ import (
 func BenchmarkHLFLoad100K(b *testing.B) { benchmarkHLFLoad(b, 100_000) }
 func BenchmarkHLFLoad250K(b *testing.B) { benchmarkHLFLoad(b, 250_000) }
 func BenchmarkHLFLoad500K(b *testing.B) { benchmarkHLFLoad(b, 500_000) }
+func BenchmarkHLFLoad750K(b *testing.B) { benchmarkHLFLoad(b, 750_000) }
+func BenchmarkHLFLoad1M(b *testing.B)   { benchmarkHLFLoad(b, 1_000_000) }
+func BenchmarkHLFLoad2M(b *testing.B)   { benchmarkHLFLoad(b, 2_000_000) }
+func BenchmarkHLFLoad5M(b *testing.B)   { benchmarkHLFLoad(b, 5_000_000) }
 
 func percentileMicros(samples []int64, p float64) float64 {
 	if len(samples) == 0 {
@@ -87,7 +91,7 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 		wg.Wait()
 
 		submitElapsed := time.Since(start)
-		for c.TotalCommitted()+c.TotalFailed() < uint64(target) && time.Since(start) < 30*time.Second {
+		for c.TotalCommitted()+c.TotalFailed() < uint64(target) && time.Since(start) < 60*time.Second {
 			time.Sleep(time.Millisecond)
 		}
 		totalElapsed := time.Since(start)
@@ -119,10 +123,10 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 	}
 }
 
-// TestHLFLoadLevels is useful for CI because it executes each load level once
-// instead of relying on the benchmark harness's repeated b.N iterations.
+// TestHLFLoadLevels executes each load level once for CI. The benchmark
+// variants above are used for detailed throughput and latency measurements.
 func TestHLFLoadLevels(t *testing.T) {
-	for _, target := range []int{100_000, 250_000, 500_000} {
+	for _, target := range []int{100_000, 250_000, 500_000, 750_000, 1_000_000, 2_000_000, 5_000_000} {
 		t.Run(fmt.Sprintf("%d", target), func(t *testing.T) {
 			c := NewHLFCommitter(BatchConfig{
 				MaxBatchSize: 2000,
@@ -136,16 +140,17 @@ func TestHLFLoadLevels(t *testing.T) {
 					t.Fatalf("transaction %d rejected", i)
 				}
 			}
-			for c.TotalCommitted() < uint64(target) && time.Since(start) < 30*time.Second {
+			for c.TotalCommitted() < uint64(target) && time.Since(start) < 60*time.Second {
 				time.Sleep(time.Millisecond)
 			}
 			elapsed := time.Since(start)
 			committed := c.TotalCommitted()
 			dropped := c.TotalDropped()
+			failed := c.TotalFailed()
 			c.Stop()
 
-			if committed != uint64(target) || dropped != 0 {
-				t.Fatalf("committed=%d dropped=%d target=%d", committed, dropped, target)
+			if committed != uint64(target) || dropped != 0 || failed != 0 {
+				t.Fatalf("committed=%d dropped=%d failed=%d target=%d", committed, dropped, failed, target)
 			}
 			t.Logf("target=%d committed=%d elapsed=%s throughput=%.0f tx/s", target, committed, elapsed, float64(committed)/elapsed.Seconds())
 		})
