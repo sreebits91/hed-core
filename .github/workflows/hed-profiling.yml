@@ -1,0 +1,62 @@
+name: HED Profiling
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile_level:
+        description: "Load level used for profiling"
+        required: true
+        default: "500K"
+        type: choice
+        options:
+          - "100K"
+          - "500K"
+          - "1M"
+          - "2M"
+          - "5M"
+
+permissions:
+  contents: read
+
+jobs:
+  profiling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Go version
+        run: go version
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: CPU, heap, allocation, mutex and block profiles
+        env:
+          PROFILE_LEVEL: ${{ inputs.profile_level }}
+        run: |
+          mkdir -p profiling
+          go test -run '^$' -bench '^BenchmarkHLFLoad${PROFILE_LEVEL}$' -benchtime=10s -count=1 -cpuprofile=profiling/cpu.pprof -memprofile=profiling/heap.pprof -mutexprofile=profiling/mutex.pprof -blockprofile=profiling/block.pprof ./pkg/hlf
+          go tool pprof -top profiling/cpu.pprof > profiling/cpu-top.txt
+          go tool pprof -top profiling/heap.pprof > profiling/heap-top.txt
+          go tool pprof -top -alloc_objects profiling/heap.pprof > profiling/alloc-top.txt
+          go tool pprof -top profiling/mutex.pprof > profiling/mutex-top.txt
+          go tool pprof -top profiling/block.pprof > profiling/block-top.txt
+
+      - name: Upload profiling artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hed-profiles-${{ inputs.profile_level }}
+          path: profiling/
+          if-no-files-found: warn
