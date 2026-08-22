@@ -3,6 +3,7 @@ package hlf
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -32,6 +33,18 @@ func percentileMicros(samples []int64, p float64) float64 {
 	return float64(samples[idx])
 }
 
+// benchTxUUID avoids fmt.Sprintf in the transaction-generation hot path.
+// It preserves the existing benchmark UUID shape while reducing formatting
+// overhead and temporary allocations.
+func benchTxUUID(workerID, txID int) string {
+	buf := make([]byte, 0, 32)
+	buf = append(buf, "bench-"...)
+	buf = strconv.AppendInt(buf, int64(workerID), 10)
+	buf = append(buf, '-')
+	buf = strconv.AppendInt(buf, int64(txID), 10)
+	return string(buf)
+}
+
 func benchmarkHLFLoad(b *testing.B, target int) {
 	b.Helper()
 
@@ -54,8 +67,10 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 
 		var next atomic.Int64
 		var rejected atomic.Uint64
-		latencies := make([]int64, 0, target/latencySampleEvery+workers)
-		var latencyMu sync.Mutex
+		// Each transaction index has a unique latency slot, so no mutex is
+		// required. The previous latencyMu introduced severe artificial block
+		// contention into the profiling result.
+		latencies := make([]int64, (target-1)/latencySampleEvery+1)
 		var wg sync.WaitGroup
 		wg.Add(workers)
 
@@ -68,7 +83,7 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 						return
 					}
 					tx := &engine.TxPayload{
-						TxUUID:    fmt.Sprintf("bench-%d-%d", workerID, i),
+						TxUUID:    benchTxUUID(workerID, i),
 						AccountID: "load-test",
 						Amount:    int64(i),
 					}
@@ -81,9 +96,7 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 						rejected.Add(1)
 					}
 					if sample {
-						latencyMu.Lock()
-						latencies = append(latencies, time.Since(submitStart).Microseconds())
-						latencyMu.Unlock()
+						latencies[i/latencySampleEvery] = time.Since(submitStart).Microseconds()
 					}
 				}
 			}(w)
