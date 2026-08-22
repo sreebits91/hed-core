@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout
+      - name: Checkout selected benchmark ref
         uses: actions/checkout@v4
 
       - name: Setup Go
@@ -41,22 +41,52 @@ jobs:
       - name: Unit tests
         run: go test ./...
 
+      - name: Validate requested benchmark exists
+        env:
+          PROFILE_LEVEL: ${{ inputs.profile_level }}
+        run: |
+          set -euo pipefail
+          mkdir -p profiling
+          BENCH="BenchmarkHLFLoad${PROFILE_LEVEL}"
+          echo "Requested benchmark: ${BENCH}"
+          go test -list '^BenchmarkHLFLoad' ./pkg/hlf | tee profiling-benchmarks.txt
+          grep -Fx "${BENCH}" profiling-benchmarks.txt
+
       - name: CPU, heap, allocation, mutex and block profiles
         env:
           PROFILE_LEVEL: ${{ inputs.profile_level }}
         run: |
-          mkdir -p profiling
-          go test -run '^$' -bench "^BenchmarkHLFLoad${PROFILE_LEVEL}$" -benchtime=10s -count=1 -cpuprofile=profiling/cpu.pprof -memprofile=profiling/heap.pprof -mutexprofile=profiling/mutex.pprof -blockprofile=profiling/block.pprof ./pkg/hlf
-          go tool pprof -top profiling/cpu.pprof > profiling/cpu-top.txt
-          go tool pprof -top profiling/heap.pprof > profiling/heap-top.txt
-          go tool pprof -top -alloc_objects profiling/heap.pprof > profiling/alloc-top.txt
-          go tool pprof -top profiling/mutex.pprof > profiling/mutex-top.txt
-          go tool pprof -top profiling/block.pprof > profiling/block-top.txt
+          set -euo pipefail
+          BENCH="BenchmarkHLFLoad${PROFILE_LEVEL}"
+          echo "Running ${BENCH} for 30 seconds"
+          go test -run '^$' -bench "^${BENCH}$" -benchtime=30s -count=1 -benchmem \
+            -cpuprofile=profiling/cpu.pprof \
+            -memprofile=profiling/heap.pprof \
+            -mutexprofile=profiling/mutex.pprof \
+            -blockprofile=profiling/block.pprof \
+            ./pkg/hlf | tee profiling/benchmark.txt
+
+          grep -Eq "${BENCH}[[:space:]]+[0-9]+" profiling/benchmark.txt
+
+          test -s profiling/cpu.pprof
+          test -s profiling/heap.pprof
+          test -s profiling/mutex.pprof
+          test -s profiling/block.pprof
+
+      - name: Generate profile summaries
+        run: |
+          set -euo pipefail
+          go tool pprof -top profiling/cpu.pprof | tee profiling/cpu-top.txt
+          go tool pprof -top profiling/heap.pprof | tee profiling/heap-top.txt
+          go tool pprof -top -alloc_objects profiling/heap.pprof | tee profiling/alloc-top.txt
+          go tool pprof -top profiling/mutex.pprof | tee profiling/mutex-top.txt
+          go tool pprof -top profiling/block.pprof | tee profiling/block-top.txt
 
       - name: Upload profiling artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: hed-profiles-${{ inputs.profile_level }}
-          path: profiling/
-          if-no-files-found: warn
+          path: |
+            profiling/
+          if-no-files-found: error
