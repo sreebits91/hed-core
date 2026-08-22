@@ -55,7 +55,7 @@ func main() {
 	}()
 	log.Println("✅ [5/5] Background Async DB Pipeline Active")
 
-	fmt.Println("\n-----------------------------------------------------------------")
+	fmt.Print("\n-----------------------------------------------------------------\n")
 	log.Println("📥 [STEP 1: PAYLOAD INGESTION] Receiving payment payload...")
 
 	sampleTx := &types.PaymentTransaction{
