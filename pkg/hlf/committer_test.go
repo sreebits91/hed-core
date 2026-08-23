@@ -8,7 +8,10 @@ import (
 )
 
 func TestHLFCommitterBatchesAndStops(t *testing.T) {
-	c := NewHLFCommitter(BatchConfig{MaxBatchSize: 64, FlushTimeout: time.Millisecond, WorkerCount: 4, QueueSize: 1024})
+	// SubmitTx is intentionally non-blocking when the bounded queue is full.
+	// The test submits all transactions without retrying, so the queue must be
+	// large enough to hold the test workload while workers drain it.
+	c := NewHLFCommitter(BatchConfig{MaxBatchSize: 64, FlushTimeout: time.Millisecond, WorkerCount: 4, QueueSize: 10000})
 
 	const total = 10000
 	for i := 0; i < total; i++ {
