@@ -56,31 +56,36 @@ jobs:
           PROFILE_LEVEL: ${{ inputs.profile_level }}
         run: |
           set -euo pipefail
-          mkdir -p profiling
+          mkdir -p "$GITHUB_WORKSPACE/profiling"
+          PROFILE_DIR="$GITHUB_WORKSPACE/profiling"
           BENCH="BenchmarkHLFLoad${PROFILE_LEVEL}"
           echo "Running ${BENCH} for 30 seconds"
+
           go test -run '^$' -bench "^${BENCH}$" -benchtime=30s -count=1 -benchmem \
-            -cpuprofile=profiling/cpu.pprof \
-            -memprofile=profiling/heap.pprof \
-            -mutexprofile=profiling/mutex.pprof \
-            -blockprofile=profiling/block.pprof \
-            ./pkg/hlf | tee profiling/benchmark.txt
+            -cpuprofile="${PROFILE_DIR}/cpu.pprof" \
+            -memprofile="${PROFILE_DIR}/heap.pprof" \
+            -mutexprofile="${PROFILE_DIR}/mutex.pprof" \
+            -blockprofile="${PROFILE_DIR}/block.pprof" \
+            ./pkg/hlf | tee "${PROFILE_DIR}/benchmark.txt"
 
-          grep -Eq "${BENCH}[[:space:]]+[0-9]+" profiling/benchmark.txt
+          echo "=== profiling directory ==="
+          find "$PROFILE_DIR" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
 
-          test -s profiling/cpu.pprof
-          test -s profiling/heap.pprof
-          test -s profiling/mutex.pprof
-          test -s profiling/block.pprof
+          grep -Eq "${BENCH}[[:space:]]+[0-9]+" "${PROFILE_DIR}/benchmark.txt"
+          test -s "${PROFILE_DIR}/cpu.pprof"
+          test -s "${PROFILE_DIR}/heap.pprof"
+          test -s "${PROFILE_DIR}/mutex.pprof"
+          test -s "${PROFILE_DIR}/block.pprof"
 
       - name: Generate profile summaries
+        if: success()
         run: |
           set -euo pipefail
-          go tool pprof -top profiling/cpu.pprof | tee profiling/cpu-top.txt
-          go tool pprof -top profiling/heap.pprof | tee profiling/heap-top.txt
-          go tool pprof -top -alloc_objects profiling/heap.pprof | tee profiling/alloc-top.txt
-          go tool pprof -top profiling/mutex.pprof | tee profiling/mutex-top.txt
-          go tool pprof -top profiling/block.pprof | tee profiling/block-top.txt
+          go tool pprof -top "$GITHUB_WORKSPACE/profiling/cpu.pprof" | tee "$GITHUB_WORKSPACE/profiling/cpu-top.txt"
+          go tool pprof -top "$GITHUB_WORKSPACE/profiling/heap.pprof" | tee "$GITHUB_WORKSPACE/profiling/heap-top.txt"
+          go tool pprof -top -alloc_objects "$GITHUB_WORKSPACE/profiling/heap.pprof" | tee "$GITHUB_WORKSPACE/profiling/alloc-top.txt"
+          go tool pprof -top "$GITHUB_WORKSPACE/profiling/mutex.pprof" | tee "$GITHUB_WORKSPACE/profiling/mutex-top.txt"
+          go tool pprof -top "$GITHUB_WORKSPACE/profiling/block.pprof" | tee "$GITHUB_WORKSPACE/profiling/block-top.txt"
 
       - name: Upload profiling artifacts
         if: always()
@@ -88,6 +93,6 @@ jobs:
         with:
           name: hed-profiles-${{ inputs.profile_level }}
           path: |
-            profiling/
-            profiling-benchmarks.txt
-          if-no-files-found: error
+            ${{ github.workspace }}/profiling/
+            ${{ github.workspace }}/profiling-benchmarks.txt
+          if-no-files-found: warn
