@@ -71,7 +71,9 @@ jobs:
           echo "=== profiling directory ==="
           find "$PROFILE_DIR" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
 
-          grep -Eq "${BENCH}[[:space:]]+[0-9]+" "${PROFILE_DIR}/benchmark.txt"
+          # Go benchmark output includes a CPU suffix (for example -4), so
+          # accept both BenchmarkName and BenchmarkName-CPUcount forms.
+          grep -Eq "${BENCH}(-[0-9]+)?[[:space:]]+[0-9]+" "${PROFILE_DIR}/benchmark.txt"
           test -s "${PROFILE_DIR}/cpu.pprof"
           test -s "${PROFILE_DIR}/heap.pprof"
           test -s "${PROFILE_DIR}/mutex.pprof"
