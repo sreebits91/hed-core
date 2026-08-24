@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,10 +44,9 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 		QueueSize:    target + 100_000,
 	}
 
-	// Pre-build transactions outside the timed region. The previous benchmark
-	// generated a UUID string and allocated a TxPayload for every transaction,
-	// making the benchmark measure its own test-data generator instead of the
-	// committer hot path. The committer only needs the payload pointer here.
+	// Build the transaction set outside the timed region. The previous version
+	// allocated a UUID string and a TxPayload for every transaction, so the
+	// benchmark mostly measured its own generator and GC instead of SubmitTx.
 	txs := make([]engine.TxPayload, target)
 	for i := range txs {
 		txs[i] = engine.TxPayload{
@@ -64,13 +64,13 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 		c := NewHLFCommitter(cfg)
 		start := time.Now()
 
-		var rejected uint64
+		var rejected atomic.Uint64
 		var wg sync.WaitGroup
 		wg.Add(workers)
 		latencies := make([]int64, (target-1)/latencySampleEvery+1)
 
-		// Give each producer a fixed strided range. This removes the atomic
-		// fetch-add contention from the benchmark producer itself.
+		// Fixed strided ownership removes the benchmark producer's atomic
+		// fetch-add contention and leaves contention in the committer visible.
 		for w := 0; w < workers; w++ {
 			go func(workerID int) {
 				defer wg.Done()
@@ -81,7 +81,7 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 						submitStart = time.Now()
 					}
 					if !c.SubmitTx(&txs[i]) {
-						rejected++
+						rejected.Add(1)
 					}
 					if sample {
 						latencies[i/latencySampleEvery] = time.Since(submitStart).Microseconds()
@@ -115,8 +115,8 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 		b.ReportMetric(percentileMicros(latencies, 0.99), "submit-p99-us")
 		b.ReportMetric(float64(c.QueueCapacity()), "queue-capacity")
 
-		if rejected != dropped {
-			b.Fatalf("load=%d: rejected=%d dropped=%d", target, rejected, dropped)
+		if rejected.Load() != dropped {
+			b.Fatalf("load=%d: rejected=%d dropped=%d", target, rejected.Load(), dropped)
 		}
 		if dropped != 0 {
 			b.Logf("load=%d saturated: dropped=%d (%.3f%%)", target, dropped, float64(dropped)/float64(target)*100)
