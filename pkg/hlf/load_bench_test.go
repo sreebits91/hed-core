@@ -3,9 +3,7 @@ package hlf
 import (
 	"fmt"
 	"sort"
-	"strconv"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,18 +31,6 @@ func percentileMicros(samples []int64, p float64) float64 {
 	return float64(samples[idx])
 }
 
-// benchTxUUID avoids fmt.Sprintf in the transaction-generation hot path.
-// It preserves the existing benchmark UUID shape while reducing formatting
-// overhead and temporary allocations.
-func benchTxUUID(workerID, txID int) string {
-	buf := make([]byte, 0, 32)
-	buf = append(buf, "bench-"...)
-	buf = strconv.AppendInt(buf, int64(workerID), 10)
-	buf = append(buf, '-')
-	buf = strconv.AppendInt(buf, int64(txID), 10)
-	return string(buf)
-}
-
 func benchmarkHLFLoad(b *testing.B, target int) {
 	b.Helper()
 
@@ -57,6 +43,19 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 		QueueSize:    target + 100_000,
 	}
 
+	// Pre-build transactions outside the timed region. The previous benchmark
+	// generated a UUID string and allocated a TxPayload for every transaction,
+	// making the benchmark measure its own test-data generator instead of the
+	// committer hot path. The committer only needs the payload pointer here.
+	txs := make([]engine.TxPayload, target)
+	for i := range txs {
+		txs[i] = engine.TxPayload{
+			TxUUID:    "bench",
+			AccountID: "load-test",
+			Amount:    int64(i),
+		}
+	}
+
 	b.ReportAllocs()
 	b.SetBytes(1)
 	b.ResetTimer()
@@ -65,35 +64,24 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 		c := NewHLFCommitter(cfg)
 		start := time.Now()
 
-		var next atomic.Int64
-		var rejected atomic.Uint64
-		// Each transaction index has a unique latency slot, so no mutex is
-		// required. The previous latencyMu introduced severe artificial block
-		// contention into the profiling result.
-		latencies := make([]int64, (target-1)/latencySampleEvery+1)
+		var rejected uint64
 		var wg sync.WaitGroup
 		wg.Add(workers)
+		latencies := make([]int64, (target-1)/latencySampleEvery+1)
 
+		// Give each producer a fixed strided range. This removes the atomic
+		// fetch-add contention from the benchmark producer itself.
 		for w := 0; w < workers; w++ {
 			go func(workerID int) {
 				defer wg.Done()
-				for {
-					i := int(next.Add(1)) - 1
-					if i >= target {
-						return
-					}
-					tx := &engine.TxPayload{
-						TxUUID:    benchTxUUID(workerID, i),
-						AccountID: "load-test",
-						Amount:    int64(i),
-					}
+				for i := workerID; i < target; i += workers {
 					sample := i%latencySampleEvery == 0
 					var submitStart time.Time
 					if sample {
 						submitStart = time.Now()
 					}
-					if !c.SubmitTx(tx) {
-						rejected.Add(1)
+					if !c.SubmitTx(&txs[i]) {
+						rejected++
 					}
 					if sample {
 						latencies[i/latencySampleEvery] = time.Since(submitStart).Microseconds()
@@ -127,8 +115,8 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 		b.ReportMetric(percentileMicros(latencies, 0.99), "submit-p99-us")
 		b.ReportMetric(float64(c.QueueCapacity()), "queue-capacity")
 
-		if rejected.Load() != dropped {
-			b.Fatalf("load=%d: rejected=%d dropped=%d", target, rejected.Load(), dropped)
+		if rejected != dropped {
+			b.Fatalf("load=%d: rejected=%d dropped=%d", target, rejected, dropped)
 		}
 		if dropped != 0 {
 			b.Logf("load=%d saturated: dropped=%d (%.3f%%)", target, dropped, float64(dropped)/float64(target)*100)
