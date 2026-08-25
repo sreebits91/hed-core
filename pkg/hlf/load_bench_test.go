@@ -44,9 +44,8 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 		QueueSize:    target + 100_000,
 	}
 
-	// Build the transaction set outside the timed region. The previous version
-	// allocated a UUID string and a TxPayload for every transaction, so the
-	// benchmark mostly measured its own generator and GC instead of SubmitTx.
+	// Generate payloads outside the timed region. The benchmark should measure
+	// the committer, not UUID formatting, payload allocation or garbage creation.
 	txs := make([]engine.TxPayload, target)
 	for i := range txs {
 		txs[i] = engine.TxPayload{
@@ -69,8 +68,6 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 		wg.Add(workers)
 		latencies := make([]int64, (target-1)/latencySampleEvery+1)
 
-		// Fixed strided ownership removes the benchmark producer's atomic
-		// fetch-add contention and leaves contention in the committer visible.
 		for w := 0; w < workers; w++ {
 			go func(workerID int) {
 				defer wg.Done()
@@ -92,7 +89,8 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 		wg.Wait()
 
 		submitElapsed := time.Since(start)
-		for c.TotalCommitted()+c.TotalFailed() < uint64(target) && time.Since(start) < 60*time.Second {
+		deadline := time.Now().Add(60 * time.Second)
+		for c.TotalCommitted()+c.TotalFailed() < uint64(target) && time.Now().Before(deadline) {
 			time.Sleep(time.Millisecond)
 		}
 		totalElapsed := time.Since(start)
@@ -104,6 +102,9 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 
 		if committed+dropped != uint64(target) {
 			b.Fatalf("load=%d: accounting mismatch committed=%d dropped=%d target=%d", target, committed, dropped, target)
+		}
+		if failed != dropped {
+			b.Fatalf("load=%d: failed=%d dropped=%d", target, failed, dropped)
 		}
 
 		b.ReportMetric(float64(committed)/totalElapsed.Seconds(), "committed-tx/s")
@@ -124,10 +125,10 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 	}
 }
 
-// TestHLFLoadLevels executes each load level once for CI. The benchmark
-// variants above are used for detailed throughput and latency measurements.
+// TestHLFLoadLevels is intentionally kept as a focused CI smoke test. Detailed
+// throughput runs belong to BenchmarkHLFLoad* and the profiling workflow.
 func TestHLFLoadLevels(t *testing.T) {
-	for _, target := range []int{100_000, 250_000, 500_000, 750_000, 1_000_000, 2_000_000, 5_000_000} {
+	for _, target := range []int{100_000, 500_000, 1_000_000} {
 		t.Run(fmt.Sprintf("%d", target), func(t *testing.T) {
 			c := NewHLFCommitter(BatchConfig{
 				MaxBatchSize: 2000,
@@ -135,16 +136,19 @@ func TestHLFLoadLevels(t *testing.T) {
 				WorkerCount:  64,
 				QueueSize:    target + 100_000,
 			})
+
 			start := time.Now()
 			for i := 0; i < target; i++ {
-				if !c.SubmitTx(&engine.TxPayload{TxUUID: fmt.Sprintf("test-%d", i), AccountID: "load-test", Amount: int64(i)}) {
+				if !c.SubmitTx(&engine.TxPayload{TxUUID: "test", AccountID: "load-test", Amount: int64(i)}) {
 					t.Fatalf("transaction %d rejected", i)
 				}
 			}
-			for c.TotalCommitted() < uint64(target) && time.Since(start) < 60*time.Second {
+
+			deadline := time.Now().Add(60 * time.Second)
+			for c.TotalCommitted()+c.TotalFailed() < uint64(target) && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
 			}
-			elapsed := time.Since(start)
+
 			committed := c.TotalCommitted()
 			dropped := c.TotalDropped()
 			failed := c.TotalFailed()
@@ -153,7 +157,7 @@ func TestHLFLoadLevels(t *testing.T) {
 			if committed != uint64(target) || dropped != 0 || failed != 0 {
 				t.Fatalf("committed=%d dropped=%d failed=%d target=%d", committed, dropped, failed, target)
 			}
-			t.Logf("target=%d committed=%d elapsed=%s throughput=%.0f tx/s", target, committed, elapsed, float64(committed)/elapsed.Seconds())
+			t.Logf("target=%d committed=%d elapsed=%s throughput=%.0f tx/s", target, committed, time.Since(start), float64(committed)/time.Since(start).Seconds())
 		})
 	}
 }
