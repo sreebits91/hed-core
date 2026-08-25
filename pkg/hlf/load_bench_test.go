@@ -1,7 +1,6 @@
 package hlf
 
 import (
-	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -35,7 +34,9 @@ func percentileMicros(samples []int64, p float64) float64 {
 func benchmarkHLFLoad(b *testing.B, target int) {
 	b.Helper()
 
-	const workers = 64
+	// The 64-worker profile was dominated by runtime select/lock activity.
+	// Sixteen workers retain parallelism without multiplying idle select loops.
+	const workers = 16
 	const latencySampleEvery = 100
 	cfg := BatchConfig{
 		MaxBatchSize: 2000,
@@ -48,11 +49,7 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 	// the committer, not UUID formatting, payload allocation or garbage creation.
 	txs := make([]engine.TxPayload, target)
 	for i := range txs {
-		txs[i] = engine.TxPayload{
-			TxUUID:    "bench",
-			AccountID: "load-test",
-			Amount:    int64(i),
-		}
+		txs[i] = engine.TxPayload{TxUUID: "bench", AccountID: "load-test", Amount: int64(i)}
 	}
 
 	b.ReportAllocs()
@@ -125,39 +122,36 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 	}
 }
 
-// TestHLFLoadLevels is intentionally kept as a focused CI smoke test. Detailed
-// throughput runs belong to BenchmarkHLFLoad* and the profiling workflow.
+// Keep the normal test suite lightweight. Large load levels are benchmark and
+// profiling workloads, not unit-test workloads.
 func TestHLFLoadLevels(t *testing.T) {
-	for _, target := range []int{100_000, 500_000, 1_000_000} {
-		t.Run(fmt.Sprintf("%d", target), func(t *testing.T) {
-			c := NewHLFCommitter(BatchConfig{
-				MaxBatchSize: 2000,
-				FlushTimeout: 2 * time.Millisecond,
-				WorkerCount:  64,
-				QueueSize:    target + 100_000,
-			})
+	const target = 100_000
+	c := NewHLFCommitter(BatchConfig{
+		MaxBatchSize: 2000,
+		FlushTimeout: 2 * time.Millisecond,
+		WorkerCount:  16,
+		QueueSize:    target + 100_000,
+	})
 
-			start := time.Now()
-			for i := 0; i < target; i++ {
-				if !c.SubmitTx(&engine.TxPayload{TxUUID: "test", AccountID: "load-test", Amount: int64(i)}) {
-					t.Fatalf("transaction %d rejected", i)
-				}
-			}
-
-			deadline := time.Now().Add(60 * time.Second)
-			for c.TotalCommitted()+c.TotalFailed() < uint64(target) && time.Now().Before(deadline) {
-				time.Sleep(time.Millisecond)
-			}
-
-			committed := c.TotalCommitted()
-			dropped := c.TotalDropped()
-			failed := c.TotalFailed()
-			c.Stop()
-
-			if committed != uint64(target) || dropped != 0 || failed != 0 {
-				t.Fatalf("committed=%d dropped=%d failed=%d target=%d", committed, dropped, failed, target)
-			}
-			t.Logf("target=%d committed=%d elapsed=%s throughput=%.0f tx/s", target, committed, time.Since(start), float64(committed)/time.Since(start).Seconds())
-		})
+	start := time.Now()
+	for i := 0; i < target; i++ {
+		if !c.SubmitTx(&engine.TxPayload{TxUUID: "test", AccountID: "load-test", Amount: int64(i)}) {
+			t.Fatalf("transaction %d rejected", i)
+		}
 	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for c.TotalCommitted()+c.TotalFailed() < uint64(target) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	committed := c.TotalCommitted()
+	dropped := c.TotalDropped()
+	failed := c.TotalFailed()
+	c.Stop()
+
+	if committed != uint64(target) || dropped != 0 || failed != 0 {
+		t.Fatalf("committed=%d dropped=%d failed=%d target=%d", committed, dropped, failed, target)
+	}
+	t.Logf("target=%d committed=%d elapsed=%s throughput=%.0f tx/s", target, committed, time.Since(start), float64(committed)/time.Since(start).Seconds())
 }
