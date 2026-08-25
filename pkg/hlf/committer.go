@@ -79,8 +79,23 @@ func (c *HLFCommitter) workerLoop() {
 	for {
 		select {
 		case <-c.ctx.Done():
-			flush()
-			return
+			// Drain transactions that were accepted before shutdown, then flush
+			// the final partial batch. This keeps Stop deterministic and avoids
+			// losing already accepted work.
+			for {
+				select {
+				case tx := <-c.txQueue:
+					if tx != nil {
+						batch = append(batch, tx)
+						if len(batch) >= c.cfg.MaxBatchSize {
+							flush()
+						}
+					}
+				default:
+					flush()
+					return
+				}
+			}
 		case tx := <-c.txQueue:
 			if tx == nil {
 				continue
@@ -95,9 +110,8 @@ func (c *HLFCommitter) workerLoop() {
 	}
 }
 
-// SubmitTx performs a bounded, non-blocking enqueue. The benchmark producer
-// never waits behind a saturated committer queue; saturation is observable via
-// TotalDropped rather than silently being counted as committed.
+// SubmitTx performs a bounded, non-blocking enqueue. Saturation is observable
+// through TotalDropped rather than silently being counted as committed.
 func (c *HLFCommitter) SubmitTx(tx *engine.TxPayload) bool {
 	if tx == nil || c.stopped.Load() {
 		atomic.AddUint64(&c.failed, 1)
@@ -118,9 +132,6 @@ func (c *HLFCommitter) SubmitTx(tx *engine.TxPayload) bool {
 }
 
 func (c *HLFCommitter) flushBatch(batch []*engine.TxPayload) {
-	// This is the HED commit accounting boundary. Actual Fabric ordering and
-	// validation remain owned by the Fabric adapter/deployer; this component
-	// measures the high-throughput handoff into that boundary.
 	atomic.AddUint64(&c.committed, uint64(len(batch)))
 }
 
