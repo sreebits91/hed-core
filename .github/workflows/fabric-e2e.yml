@@ -1,0 +1,72 @@
+name: HED Fabric E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/hed-v2-stability]
+
+permissions:
+  contents: read
+
+jobs:
+  fabric-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.1'
+          cache: true
+      - name: Install Fabric binaries and images
+        working-directory: fabric-samples
+        run: ./install-fabric.sh docker binary
+      - name: Start Fabric test network
+        working-directory: fabric-samples/test-network
+        run: ./network.sh up createChannel -ca
+      - name: Deploy HED chaincode
+        working-directory: fabric-samples/test-network
+        run: ./network.sh deployCC -ccn hed -ccp ../../chaincode -ccl go
+      - name: Run live gateway, ledger identity and reconciliation tests
+        working-directory: integration/fabric-gateway
+        env:
+          HED_FABRIC_E2E: '1'
+          FABRIC_MSP_ID: Org1MSP
+          FABRIC_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/signcerts
+          FABRIC_KEY_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/keystore
+          FABRIC_TLS_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+          FABRIC_PEER_ENDPOINT: dns:///localhost:7051
+          FABRIC_GATEWAY_PEER: peer0.org1.example.com
+          FABRIC_CHANNEL: mychannel
+          FABRIC_CHAINCODE: hed
+          FABRIC_FUNCTION: Commit
+        run: go test -run '^TestLiveFabric' -v ./...
+      - name: Inject peer failure and verify client failure path
+        working-directory: integration/fabric-gateway
+        env:
+          HED_FABRIC_E2E: '1'
+          HED_FABRIC_FAILURE: 'peer'
+          FABRIC_MSP_ID: Org1MSP
+          FABRIC_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/signcerts
+          FABRIC_KEY_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/keystore
+          FABRIC_TLS_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+          FABRIC_PEER_ENDPOINT: dns:///localhost:7051
+          FABRIC_GATEWAY_PEER: peer0.org1.example.com
+          FABRIC_CHANNEL: mychannel
+          FABRIC_CHAINCODE: hed
+          FABRIC_FUNCTION: Commit
+        run: |
+          docker stop peer0.org1.example.com
+          trap 'cd ../../fabric-samples/test-network && docker start peer0.org1.example.com >/dev/null' EXIT
+          go test -run '^TestLiveFabricFailure' -v ./...
+      - name: Verify post-failure ledger recovery
+        working-directory: fabric-samples/test-network
+        run: |
+          docker start peer0.org1.example.com >/dev/null || true
+          sleep 5
+      - name: Tear down Fabric
+        if: always()
+        working-directory: fabric-samples/test-network
+        run: ./network.sh down
