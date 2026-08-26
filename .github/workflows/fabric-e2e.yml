@@ -29,7 +29,7 @@ jobs:
       - name: Deploy HED chaincode
         working-directory: fabric-samples/test-network
         run: ./network.sh deployCC -ccn hed -ccp ../../chaincode -ccl go
-      - name: Run live gateway, ledger identity and reconciliation tests
+      - name: Live Fabric Gateway and ledger reconciliation
         working-directory: integration/fabric-gateway
         env:
           HED_FABRIC_E2E: '1'
@@ -43,11 +43,11 @@ jobs:
           FABRIC_CHAINCODE: hed
           FABRIC_FUNCTION: Commit
         run: go test -run '^TestLiveFabric' -v ./...
-      - name: Inject peer failure and verify client failure path
+      - name: Inject peer failure
         working-directory: integration/fabric-gateway
         env:
           HED_FABRIC_E2E: '1'
-          HED_FABRIC_FAILURE: 'peer'
+          HED_FABRIC_FAILURE: peer
           FABRIC_MSP_ID: Org1MSP
           FABRIC_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/signcerts
           FABRIC_KEY_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/keystore
@@ -59,13 +59,26 @@ jobs:
           FABRIC_FUNCTION: Commit
         run: |
           docker stop peer0.org1.example.com
-          trap 'cd ../../fabric-samples/test-network && docker start peer0.org1.example.com >/dev/null' EXIT
-          go test -run '^TestLiveFabricFailure' -v ./...
-      - name: Verify post-failure ledger recovery
-        working-directory: fabric-samples/test-network
+          trap 'docker start peer0.org1.example.com >/dev/null' EXIT
+          go test -run '^TestLiveFabricFailure$' -v ./...
+      - name: Inject orderer failure
+        working-directory: integration/fabric-gateway
+        env:
+          HED_FABRIC_E2E: '1'
+          HED_FABRIC_FAILURE: orderer
+          FABRIC_MSP_ID: Org1MSP
+          FABRIC_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/signcerts
+          FABRIC_KEY_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/keystore
+          FABRIC_TLS_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/ca.crt
+          FABRIC_PEER_ENDPOINT: dns:///localhost:7051
+          FABRIC_GATEWAY_PEER: peer0.org1.example.com
+          FABRIC_CHANNEL: mychannel
+          FABRIC_CHAINCODE: hed
+          FABRIC_FUNCTION: Commit
         run: |
-          docker start peer0.org1.example.com >/dev/null || true
-          sleep 5
+          docker stop orderer.example.com
+          trap 'docker start orderer.example.com >/dev/null' EXIT
+          go test -run '^TestLiveFabricFailure$' -v ./...
       - name: Tear down Fabric
         if: always()
         working-directory: fabric-samples/test-network
