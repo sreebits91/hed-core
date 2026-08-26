@@ -139,7 +139,7 @@ jobs:
           HED_FABRIC_FAILURE: orderer
           FABRIC_MSP_ID: Org1MSP
           FABRIC_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/signcerts
-          FABRIC_KEY_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/keystore
+          FABRIC_KEY_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/keystore
           FABRIC_TLS_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/ca.crt
           FABRIC_PEER_ENDPOINT: localhost:7051
           FABRIC_GATEWAY_PEER: peer0.org1.example.com
