@@ -31,12 +31,10 @@ jobs:
           docker version
           docker info
 
-      # Fabric's supported installer lives in the Fabric repository, not in
-      # fabric-samples. The installer itself clones a compatible samples tree
-      # and places the CLI binaries/configuration under fabric-samples.
       - name: Install Fabric from official installer
         working-directory: ${{ github.workspace }}
         run: |
+          set -euo pipefail
           rm -rf fabric-samples install-fabric.sh
           curl -fsSL --retry 5 --retry-delay 3 \
             https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh \
@@ -52,16 +50,20 @@ jobs:
           fabric-samples/bin/peer version
           fabric-samples/bin/orderer version
 
-      - name: Verify Fabric sample/network compatibility
+      - name: Verify Fabric test network
         working-directory: fabric-samples/test-network
         run: |
+          set -euo pipefail
+          test -x ./network.sh
+          test -f ./compose/compose-test-net.yaml
           ./network.sh -h >/dev/null
-          test -f compose/compose-test-net.yaml
-          test -f network.sh
+          grep -q 'createChannel' ./network.sh
+          grep -q 'deployCC' ./network.sh
 
       - name: Start Fabric test network
         working-directory: fabric-samples/test-network
         run: |
+          set -euo pipefail
           ./network.sh down || true
           ./network.sh up createChannel -ca -c mychannel
           docker ps --format '{{.Names}}' | grep -E 'peer0\.org1\.example\.com|orderer\.example\.com'
@@ -69,6 +71,7 @@ jobs:
       - name: Deploy HED chaincode
         working-directory: fabric-samples/test-network
         run: |
+          set -euo pipefail
           ./network.sh deployCC -ccn hed -ccp "${{ github.workspace }}/chaincode" -ccl go
 
       - name: Verify HED chaincode is committed
@@ -87,7 +90,7 @@ jobs:
           FABRIC_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/signcerts
           FABRIC_KEY_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/keystore
           FABRIC_TLS_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
-          FABRIC_PEER_ENDPOINT: dns:///localhost:7051
+          FABRIC_PEER_ENDPOINT: localhost:7051
           FABRIC_GATEWAY_PEER: peer0.org1.example.com
           FABRIC_CHANNEL: mychannel
           FABRIC_CHAINCODE: hed
@@ -103,7 +106,7 @@ jobs:
           FABRIC_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/signcerts
           FABRIC_KEY_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/keystore
           FABRIC_TLS_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
-          FABRIC_PEER_ENDPOINT: dns:///localhost:7051
+          FABRIC_PEER_ENDPOINT: localhost:7051
           FABRIC_GATEWAY_PEER: peer0.org1.example.com
           FABRIC_CHANNEL: mychannel
           FABRIC_CHAINCODE: hed
@@ -123,7 +126,7 @@ jobs:
           FABRIC_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/signcerts
           FABRIC_KEY_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/keystore
           FABRIC_TLS_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/ca.crt
-          FABRIC_PEER_ENDPOINT: dns:///localhost:7051
+          FABRIC_PEER_ENDPOINT: localhost:7051
           FABRIC_GATEWAY_PEER: peer0.org1.example.com
           FABRIC_CHANNEL: mychannel
           FABRIC_CHAINCODE: hed
