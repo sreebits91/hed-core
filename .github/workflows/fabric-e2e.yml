@@ -22,18 +22,18 @@ jobs:
           go-version: '1.26.1'
           cache: true
 
-      # The pinned fabric-samples revision used by this repository does not
-      # contain install-fabric.sh. Use the upstream installer explicitly and
-      # install into the workspace so test-network/network.sh can find it.
+      # The pinned fabric-samples revision does not ship the installer.
+      # Fetch the upstream installer into the submodule and install the
+      # Fabric CLI/configuration beside test-network, where network.sh expects it.
       - name: Install Fabric binaries and images
         working-directory: fabric-samples
         run: |
           curl -fsSL https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh -o install-fabric.sh
           chmod +x install-fabric.sh
           ./install-fabric.sh docker binary
-          test -x ../bin/peer
-          test -x ../bin/orderer
-          test -f ../config/core.yaml
+          test -x ./bin/peer
+          test -x ./bin/orderer
+          test -f ./config/core.yaml
 
       - name: Start Fabric test network
         working-directory: fabric-samples/test-network
