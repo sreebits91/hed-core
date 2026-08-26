@@ -15,6 +15,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GOTOOLCHAIN: local
+
 jobs:
   correctness:
     runs-on: ubuntu-latest
@@ -89,7 +92,8 @@ jobs:
           go-version: '1.26.1'
           cache: true
       - run: go mod download
-      - run: go list -m all
+      - name: List modules from module graph
+        run: go list -mod=mod -m all
       - name: Go vulnerability scan
         uses: golang/govulncheck-action@v1
         with:
