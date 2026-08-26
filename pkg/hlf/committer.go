@@ -36,8 +36,12 @@ func NewHLFCommitter(cfg BatchConfig) *HLFCommitter {
 	if cfg.FlushTimeout <= 0 {
 		cfg.FlushTimeout = 2 * time.Millisecond
 	}
+	// The queue has a single consumer by default. Multiple consumers on the
+	// same channel caused unnecessary runtime select/lock contention at high
+	// load. WorkerCount remains configurable for callers that need parallel
+	// consumers for a different workload.
 	if cfg.WorkerCount <= 0 {
-		cfg.WorkerCount = 32
+		cfg.WorkerCount = 1
 	}
 	if cfg.QueueSize <= 0 {
 		cfg.QueueSize = 500000
@@ -65,8 +69,18 @@ func (c *HLFCommitter) workerLoop() {
 	defer c.wg.Done()
 
 	batch := make([]*engine.TxPayload, 0, c.cfg.MaxBatchSize)
-	ticker := time.NewTicker(c.cfg.FlushTimeout)
-	defer ticker.Stop()
+	timer := time.NewTimer(c.cfg.FlushTimeout)
+	defer timer.Stop()
+
+	resetTimer := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(c.cfg.FlushTimeout)
+	}
 
 	flush := func() {
 		if len(batch) == 0 {
@@ -74,22 +88,23 @@ func (c *HLFCommitter) workerLoop() {
 		}
 		c.flushBatch(batch)
 		batch = batch[:0]
+		resetTimer()
 	}
 
 	for {
 		select {
 		case <-c.ctx.Done():
-			// Drain transactions that were accepted before shutdown, then flush
-			// the final partial batch. This keeps Stop deterministic and avoids
-			// losing already accepted work.
+			// Drain all transactions accepted before shutdown. No new transaction
+			// can be accepted once Stop marks the committer stopped.
 			for {
 				select {
 				case tx := <-c.txQueue:
-					if tx != nil {
-						batch = append(batch, tx)
-						if len(batch) >= c.cfg.MaxBatchSize {
-							flush()
-						}
+					if tx == nil {
+						continue
+					}
+					batch = append(batch, tx)
+					if len(batch) >= c.cfg.MaxBatchSize {
+						flush()
 					}
 				default:
 					flush()
@@ -104,7 +119,7 @@ func (c *HLFCommitter) workerLoop() {
 			if len(batch) >= c.cfg.MaxBatchSize {
 				flush()
 			}
-		case <-ticker.C:
+		case <-timer.C:
 			flush()
 		}
 	}
