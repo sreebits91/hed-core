@@ -1,0 +1,60 @@
+name: HED v2 Validation
+
+on:
+  push:
+    branches: [main, feature/hed-v2-stability]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      qualify:
+        description: Run the 100K-5M qualification matrix
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  correctness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.1'
+          cache: true
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: go test -run 'Test(QueueConcurrentNoLoss|PipelineGracefulDrainAndDedup|WALReplayOnlyUncommitted|WALCorruptRecord|CommitRetry|BackpressureStates)$' -count=20 ./pkg/v2
+
+  benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.1'
+          cache: true
+      - run: go test -bench 'Benchmark(Queue|Channel|PartitionRouting|PipelineIngress)$' -benchmem -benchtime=2s ./pkg/v2
+
+  qualification:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.qualify == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        load: [100000, 250000, 500000, 1000000, 2000000, 5000000]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.1'
+          cache: true
+      - name: Qualification ${{ matrix.load }}
+        env:
+          HED_QUALIFY: '1'
+          HED_LOAD_N: ${{ matrix.load }}
+        run: go test -run '^TestQualification$' -count=1 ./pkg/v2
