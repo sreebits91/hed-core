@@ -34,14 +34,15 @@ func percentileMicros(samples []int64, p float64) float64 {
 func benchmarkHLFLoad(b *testing.B, target int) {
 	b.Helper()
 
-	// The 64-worker profile was dominated by runtime select/lock activity.
-	// Sixteen workers retain parallelism without multiplying idle select loops.
-	const workers = 16
+	// One consumer avoids the channel/select contention identified in the
+	// previous profiling run. Submission remains parallel to exercise the
+	// production-facing ingress path.
+	const producers = 16
 	const latencySampleEvery = 100
 	cfg := BatchConfig{
 		MaxBatchSize: 2000,
 		FlushTimeout: 2 * time.Millisecond,
-		WorkerCount:  workers,
+		WorkerCount:  1,
 		QueueSize:    target + 100_000,
 	}
 
@@ -62,13 +63,13 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 
 		var rejected atomic.Uint64
 		var wg sync.WaitGroup
-		wg.Add(workers)
+		wg.Add(producers)
 		latencies := make([]int64, (target-1)/latencySampleEvery+1)
 
-		for w := 0; w < workers; w++ {
+		for w := 0; w < producers; w++ {
 			go func(workerID int) {
 				defer wg.Done()
-				for i := workerID; i < target; i += workers {
+				for i := workerID; i < target; i += producers {
 					sample := i%latencySampleEvery == 0
 					var submitStart time.Time
 					if sample {
@@ -129,7 +130,7 @@ func TestHLFLoadLevels(t *testing.T) {
 	c := NewHLFCommitter(BatchConfig{
 		MaxBatchSize: 2000,
 		FlushTimeout: 2 * time.Millisecond,
-		WorkerCount:  16,
+		WorkerCount:  1,
 		QueueSize:    target + 100_000,
 	})
 
