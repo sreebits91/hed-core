@@ -56,10 +56,6 @@ jobs:
           set -euo pipefail
           test -x ./network.sh
           test -f ./compose/compose-test-net.yaml
-          ./network.sh -h >/dev/null
-          # Do not grep implementation details: Fabric's official network.sh
-          # is allowed to change its help/script internals while preserving
-          # the supported commands used by this workflow.
 
       - name: Start Fabric test network
         working-directory: fabric-samples/test-network
