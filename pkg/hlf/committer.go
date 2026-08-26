@@ -62,25 +62,6 @@ func (c *HLFCommitter) workerLoop() {
 	timer := time.NewTimer(c.cfg.FlushTimeout)
 	defer timer.Stop()
 
-	resetTimer := func() {
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timer.Reset(c.cfg.FlushTimeout)
-	}
-
-	flush := func() {
-		if len(batch) == 0 {
-			return
-		}
-		c.flushBatch(batch)
-		batch = batch[:0]
-		resetTimer()
-	}
-
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -90,24 +71,41 @@ func (c *HLFCommitter) workerLoop() {
 					if tx != nil {
 						batch = append(batch, tx)
 						if len(batch) >= c.cfg.MaxBatchSize {
-							flush()
+							c.flushBatch(batch)
+							batch = batch[:0]
 						}
 					}
 				default:
-					flush()
+					if len(batch) > 0 {
+						c.flushBatch(batch)
+					}
 					return
 				}
 			}
+
 		case tx := <-c.txQueue:
 			if tx == nil {
 				continue
 			}
 			batch = append(batch, tx)
 			if len(batch) >= c.cfg.MaxBatchSize {
-				flush()
+				c.flushBatch(batch)
+				batch = batch[:0]
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(c.cfg.FlushTimeout)
 			}
+
 		case <-timer.C:
-			flush()
+			if len(batch) > 0 {
+				c.flushBatch(batch)
+				batch = batch[:0]
+			}
+			timer.Reset(c.cfg.FlushTimeout)
 		}
 	}
 }
