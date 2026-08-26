@@ -57,6 +57,16 @@ jobs:
           test -x ./network.sh
           test -f ./compose/compose-test-net.yaml
 
+      - name: Prepare HED chaincode dependencies
+        working-directory: chaincode
+        env:
+          GOFLAGS: '-mod=mod'
+        run: |
+          set -euo pipefail
+          go mod tidy
+          test -s go.sum
+          go mod verify
+
       - name: Start Fabric test network
         working-directory: fabric-samples/test-network
         run: |
