@@ -63,9 +63,17 @@ jobs:
           GOFLAGS: '-mod=mod'
         run: |
           set -euo pipefail
-          go mod tidy
+          for attempt in 1 2 3; do
+            if go mod tidy && go mod verify; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo 'go module preparation failed after 3 attempts' >&2
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
           test -s go.sum
-          go mod verify
 
       - name: Start Fabric test network
         working-directory: fabric-samples/test-network
@@ -131,7 +139,7 @@ jobs:
           HED_FABRIC_FAILURE: orderer
           FABRIC_MSP_ID: Org1MSP
           FABRIC_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/signcerts
-          FABRIC_KEY_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/keystore
+          FABRIC_KEY_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/keystore
           FABRIC_TLS_CERT_PATH: ${{ github.workspace }}/fabric-samples/test-network/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/ca.crt
           FABRIC_PEER_ENDPOINT: localhost:7051
           FABRIC_GATEWAY_PEER: peer0.org1.example.com
