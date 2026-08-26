@@ -2,6 +2,7 @@ package queue
 
 import (
 	"sync"
+
 	"hed-core/pkg/engine"
 )
 
@@ -27,7 +28,7 @@ func (q *RingQueue) Push(tx *engine.TxPayload) bool {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.closed || q.size == len(q.items) {
+	if q.closed || q.size >= len(q.items) {
 		return false
 	}
 	q.items[q.tail] = tx
