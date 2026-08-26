@@ -2,14 +2,13 @@ package batch
 
 import (
 	"time"
-
 	"hed-core/pkg/engine"
 	"hed-core/pkg/queue"
 )
 
 type Batcher struct {
 	queue queue.TransactionQueue
-	size  int
+	size int
 	timeout time.Duration
 }
 
@@ -28,7 +27,7 @@ func (b *Batcher) Collect() []*engine.TxPayload {
 			batch = append(batch, tx)
 			continue
 		}
-		if len(batch) > 0 && time.Now().After(deadline) { break }
+		if time.Now().After(deadline) { return batch }
 		time.Sleep(time.Microsecond)
 	}
 	return batch
