@@ -8,9 +8,10 @@ import (
 )
 
 func TestHLFCommitterBatchesAndStops(t *testing.T) {
-	c := NewHLFCommitter(BatchConfig{MaxBatchSize: 64, FlushTimeout: time.Millisecond, WorkerCount: 4, QueueSize: 1024})
-
 	const total = 10000
+	c := NewHLFCommitter(BatchConfig{MaxBatchSize: 64, FlushTimeout: time.Millisecond, WorkerCount: 4, QueueSize: total + 1024})
+	defer c.Stop()
+
 	for i := 0; i < total; i++ {
 		tx := &engine.TxPayload{TxUUID: engine.GenerateUUID(), AccountID: "acc", Amount: int64(i)}
 		if !c.SubmitTx(tx) {
