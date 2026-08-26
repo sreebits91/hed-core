@@ -11,24 +11,38 @@ permissions:
 jobs:
   fabric-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26.1'
           cache: true
+
+      # The pinned fabric-samples revision used by this repository does not
+      # contain install-fabric.sh. Use the upstream installer explicitly and
+      # install into the workspace so test-network/network.sh can find it.
       - name: Install Fabric binaries and images
         working-directory: fabric-samples
-        run: ./install-fabric.sh docker binary
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh -o install-fabric.sh
+          chmod +x install-fabric.sh
+          ./install-fabric.sh docker binary
+          test -x ../bin/peer
+          test -x ../bin/orderer
+          test -f ../config/core.yaml
+
       - name: Start Fabric test network
         working-directory: fabric-samples/test-network
         run: ./network.sh up createChannel -ca
+
       - name: Deploy HED chaincode
         working-directory: fabric-samples/test-network
         run: ./network.sh deployCC -ccn hed -ccp ../../chaincode -ccl go
+
       - name: Live Fabric Gateway and ledger reconciliation
         working-directory: integration/fabric-gateway
         env:
@@ -43,6 +57,7 @@ jobs:
           FABRIC_CHAINCODE: hed
           FABRIC_FUNCTION: Commit
         run: go test -run '^TestLiveFabric' -v ./...
+
       - name: Inject peer failure
         working-directory: integration/fabric-gateway
         env:
@@ -59,8 +74,9 @@ jobs:
           FABRIC_FUNCTION: Commit
         run: |
           docker stop peer0.org1.example.com
-          trap 'docker start peer0.org1.example.com >/dev/null' EXIT
+          trap 'docker start peer0.org1.example.com >/dev/null 2>&1 || true' EXIT
           go test -run '^TestLiveFabricFailure$' -v ./...
+
       - name: Inject orderer failure
         working-directory: integration/fabric-gateway
         env:
@@ -77,8 +93,9 @@ jobs:
           FABRIC_FUNCTION: Commit
         run: |
           docker stop orderer.example.com
-          trap 'docker start orderer.example.com >/dev/null' EXIT
+          trap 'docker start orderer.example.com >/dev/null 2>&1 || true' EXIT
           go test -run '^TestLiveFabricFailure$' -v ./...
+
       - name: Tear down Fabric
         if: always()
         working-directory: fabric-samples/test-network
