@@ -36,10 +36,6 @@ func NewHLFCommitter(cfg BatchConfig) *HLFCommitter {
 	if cfg.FlushTimeout <= 0 {
 		cfg.FlushTimeout = 2 * time.Millisecond
 	}
-	// The queue has a single consumer by default. Multiple consumers on the
-	// same channel caused unnecessary runtime select/lock contention at high
-	// load. WorkerCount remains configurable for callers that need parallel
-	// consumers for a different workload.
 	if cfg.WorkerCount <= 0 {
 		cfg.WorkerCount = 1
 	}
@@ -54,15 +50,9 @@ func NewHLFCommitter(cfg BatchConfig) *HLFCommitter {
 		ctx:     ctx,
 		cancel:  cancel,
 	}
-	c.startWorkers()
+	c.wg.Add(1)
+	go c.workerLoop()
 	return c
-}
-
-func (c *HLFCommitter) startWorkers() {
-	for i := 0; i < c.cfg.WorkerCount; i++ {
-		c.wg.Add(1)
-		go c.workerLoop()
-	}
 }
 
 func (c *HLFCommitter) workerLoop() {
@@ -94,17 +84,14 @@ func (c *HLFCommitter) workerLoop() {
 	for {
 		select {
 		case <-c.ctx.Done():
-			// Drain all transactions accepted before shutdown. No new transaction
-			// can be accepted once Stop marks the committer stopped.
 			for {
 				select {
 				case tx := <-c.txQueue:
-					if tx == nil {
-						continue
-					}
-					batch = append(batch, tx)
-					if len(batch) >= c.cfg.MaxBatchSize {
-						flush()
+					if tx != nil {
+						batch = append(batch, tx)
+						if len(batch) >= c.cfg.MaxBatchSize {
+							flush()
+						}
 					}
 				default:
 					flush()
@@ -125,8 +112,6 @@ func (c *HLFCommitter) workerLoop() {
 	}
 }
 
-// SubmitTx performs a bounded, non-blocking enqueue. Saturation is observable
-// through TotalDropped rather than silently being counted as committed.
 func (c *HLFCommitter) SubmitTx(tx *engine.TxPayload) bool {
 	if tx == nil || c.stopped.Load() {
 		atomic.AddUint64(&c.failed, 1)
@@ -134,9 +119,6 @@ func (c *HLFCommitter) SubmitTx(tx *engine.TxPayload) bool {
 	}
 
 	select {
-	case <-c.ctx.Done():
-		atomic.AddUint64(&c.failed, 1)
-		return false
 	case c.txQueue <- tx:
 		return true
 	default:
@@ -150,25 +132,11 @@ func (c *HLFCommitter) flushBatch(batch []*engine.TxPayload) {
 	atomic.AddUint64(&c.committed, uint64(len(batch)))
 }
 
-func (c *HLFCommitter) TotalCommitted() uint64 {
-	return atomic.LoadUint64(&c.committed)
-}
-
-func (c *HLFCommitter) TotalFailed() uint64 {
-	return atomic.LoadUint64(&c.failed)
-}
-
-func (c *HLFCommitter) TotalDropped() uint64 {
-	return atomic.LoadUint64(&c.dropped)
-}
-
-func (c *HLFCommitter) QueueDepth() int {
-	return len(c.txQueue)
-}
-
-func (c *HLFCommitter) QueueCapacity() int {
-	return cap(c.txQueue)
-}
+func (c *HLFCommitter) TotalCommitted() uint64 { return atomic.LoadUint64(&c.committed) }
+func (c *HLFCommitter) TotalFailed() uint64    { return atomic.LoadUint64(&c.failed) }
+func (c *HLFCommitter) TotalDropped() uint64   { return atomic.LoadUint64(&c.dropped) }
+func (c *HLFCommitter) QueueDepth() int        { return len(c.txQueue) }
+func (c *HLFCommitter) QueueCapacity() int     { return cap(c.txQueue) }
 
 func (c *HLFCommitter) Stop() {
 	c.stopOnce.Do(func() {
