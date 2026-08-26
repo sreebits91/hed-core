@@ -13,27 +13,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Checkout HED Core
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
         with:
           go-version: '1.26.1'
           cache: true
 
-      # The pinned fabric-samples revision does not ship the installer.
-      # Fetch the upstream installer into the submodule and install the
-      # Fabric CLI/configuration beside test-network, where network.sh expects it.
+      # Do not depend on the repository submodule's Fabric revision or layout.
+      # Start from a clean upstream fabric-samples checkout so the installer and
+      # test-network scripts always come from the same known source tree.
+      - name: Fetch clean Fabric samples
+        run: |
+          rm -rf fabric-samples
+          git clone --depth 1 --branch main https://github.com/hyperledger/fabric-samples.git fabric-samples
+          test -x fabric-samples/scripts/install-fabric.sh
+          test -x fabric-samples/test-network/network.sh
+
       - name: Install Fabric binaries and images
         working-directory: fabric-samples
         run: |
-          curl -fsSL https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh -o install-fabric.sh
-          chmod +x install-fabric.sh
-          ./install-fabric.sh docker binary
+          ./scripts/install-fabric.sh docker binary
           test -x ./bin/peer
           test -x ./bin/orderer
           test -f ./config/core.yaml
+          test -f ./test-network/network.sh
 
       - name: Start Fabric test network
         working-directory: fabric-samples/test-network
