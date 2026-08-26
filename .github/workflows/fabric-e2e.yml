@@ -8,10 +8,14 @@ on:
 permissions:
   contents: read
 
+env:
+  FABRIC_VERSION: '3.1.5'
+  FABRIC_CA_VERSION: '1.5.17'
+
 jobs:
   fabric-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Checkout HED Core
         uses: actions/checkout@v4
@@ -19,35 +23,61 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.26.1'
+          go-version: '1.26.4'
           cache: true
 
-      # Do not depend on the repository submodule's Fabric revision or layout.
-      # Start from a clean upstream fabric-samples checkout so the installer and
-      # test-network scripts always come from the same known source tree.
-      - name: Fetch clean Fabric samples
+      - name: Verify Docker
         run: |
-          rm -rf fabric-samples
-          git clone --depth 1 --branch main https://github.com/hyperledger/fabric-samples.git fabric-samples
-          test -x fabric-samples/scripts/install-fabric.sh
-          test -x fabric-samples/test-network/network.sh
+          docker version
+          docker info
 
-      - name: Install Fabric binaries and images
-        working-directory: fabric-samples
+      # Fabric's supported installer lives in the Fabric repository, not in
+      # fabric-samples. The installer itself clones a compatible samples tree
+      # and places the CLI binaries/configuration under fabric-samples.
+      - name: Install Fabric from official installer
+        working-directory: ${{ github.workspace }}
         run: |
-          ./scripts/install-fabric.sh docker binary
-          test -x ./bin/peer
-          test -x ./bin/orderer
-          test -f ./config/core.yaml
-          test -f ./test-network/network.sh
+          rm -rf fabric-samples install-fabric.sh
+          curl -fsSL --retry 5 --retry-delay 3 \
+            https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh \
+            -o install-fabric.sh
+          chmod +x install-fabric.sh
+          ./install-fabric.sh --fabric-version "${FABRIC_VERSION}" \
+            --ca-version "${FABRIC_CA_VERSION}" samples binary docker
+          test -x fabric-samples/test-network/network.sh
+          test -x fabric-samples/bin/peer
+          test -x fabric-samples/bin/orderer
+          test -f fabric-samples/config/core.yaml
+          test -f fabric-samples/config/orderer.yaml
+          fabric-samples/bin/peer version
+          fabric-samples/bin/orderer version
+
+      - name: Verify Fabric sample/network compatibility
+        working-directory: fabric-samples/test-network
+        run: |
+          ./network.sh -h >/dev/null
+          test -f compose/compose-test-net.yaml
+          test -f network.sh
 
       - name: Start Fabric test network
         working-directory: fabric-samples/test-network
-        run: ./network.sh up createChannel -ca
+        run: |
+          ./network.sh down || true
+          ./network.sh up createChannel -ca -c mychannel
+          docker ps --format '{{.Names}}' | grep -E 'peer0\.org1\.example\.com|orderer\.example\.com'
 
       - name: Deploy HED chaincode
         working-directory: fabric-samples/test-network
-        run: ./network.sh deployCC -ccn hed -ccp ../../chaincode -ccl go
+        run: |
+          ./network.sh deployCC -ccn hed -ccp "${{ github.workspace }}/chaincode" -ccl go
+
+      - name: Verify HED chaincode is committed
+        working-directory: fabric-samples/test-network
+        run: |
+          set -euo pipefail
+          source ./scripts/envVar.sh
+          setGlobals 1
+          peer lifecycle chaincode querycommitted -C mychannel -n hed
 
       - name: Live Fabric Gateway and ledger reconciliation
         working-directory: integration/fabric-gateway
@@ -79,6 +109,7 @@ jobs:
           FABRIC_CHAINCODE: hed
           FABRIC_FUNCTION: Commit
         run: |
+          set -euo pipefail
           docker stop peer0.org1.example.com
           trap 'docker start peer0.org1.example.com >/dev/null 2>&1 || true' EXIT
           go test -run '^TestLiveFabricFailure$' -v ./...
@@ -98,6 +129,7 @@ jobs:
           FABRIC_CHAINCODE: hed
           FABRIC_FUNCTION: Commit
         run: |
+          set -euo pipefail
           docker stop orderer.example.com
           trap 'docker start orderer.example.com >/dev/null 2>&1 || true' EXIT
           go test -run '^TestLiveFabricFailure$' -v ./...
@@ -105,4 +137,4 @@ jobs:
       - name: Tear down Fabric
         if: always()
         working-directory: fabric-samples/test-network
-        run: ./network.sh down
+        run: ./network.sh down || true
