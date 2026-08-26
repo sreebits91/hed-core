@@ -39,8 +39,7 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 		txs[i] = engine.TxPayload{TxUUID: "bench", AccountID: "load-test", Amount: int64(i)}
 	}
 
-	// Construct once outside the timed region. This removes queue allocation
-	// and goroutine startup from the steady-state throughput measurement.
+	// Queue allocation and worker startup are outside the timed steady-state.
 	c := NewHLFCommitter(cfg)
 	defer c.Stop()
 
@@ -49,6 +48,9 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 	b.ResetTimer()
 
 	for iteration := 0; iteration < b.N; iteration++ {
+		baseCommitted := c.TotalCommitted()
+		baseFailed := c.TotalFailed()
+		baseDropped := c.TotalDropped()
 		var rejected atomic.Uint64
 		var wg sync.WaitGroup
 		wg.Add(producers)
@@ -70,21 +72,21 @@ func benchmarkHLFLoad(b *testing.B, target int) {
 					if sample {
 						latencies[i/latencySampleEvery] = time.Since(submitStart).Microseconds()
 					}
-				}(/* no-op */)
+				}
 			}(w)
 		}
 		wg.Wait()
 
 		submitElapsed := time.Since(start)
 		deadline := time.Now().Add(60 * time.Second)
-		for c.TotalCommitted()+c.TotalFailed() < uint64(target) && time.Now().Before(deadline) {
+		for c.TotalCommitted()+c.TotalFailed() < baseCommitted+baseFailed+uint64(target) && time.Now().Before(deadline) {
 			time.Sleep(time.Millisecond)
 		}
 		totalElapsed := time.Since(start)
 
-		committed := c.TotalCommitted()
-		dropped := c.TotalDropped()
-		failed := c.TotalFailed()
+		committed := c.TotalCommitted() - baseCommitted
+		dropped := c.TotalDropped() - baseDropped
+		failed := c.TotalFailed() - baseFailed
 
 		if committed+dropped != uint64(target) {
 			b.Fatalf("load=%d: accounting mismatch committed=%d dropped=%d target=%d", target, committed, dropped, target)
