@@ -1,0 +1,48 @@
+name: HED v2 Qualification
+
+on:
+  push:
+    branches: [feature/hed-v2-stability]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualification:
+    strategy:
+      fail-fast: false
+      matrix:
+        load: [100000, 250000, 500000, 1000000, 2000000, 5000000]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.1'
+          cache: true
+      - name: Qualify ${{ matrix.load }} transactions
+        env:
+          HED_QUALIFY: '1'
+          HED_LOAD_N: ${{ matrix.load }}
+        run: go test -run '^TestQualification$' -count=1 -timeout=25m -v ./pkg/v2
+
+  profiles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.1'
+          cache: true
+      - name: Capture 1M CPU/heap/mutex/block profiles
+        env:
+          HED_QUALIFY: '1'
+          HED_LOAD_N: '1000000'
+        run: go test -run '^TestQualification$' -count=1 -timeout=25m -cpuprofile=cpu.pprof -memprofile=heap.pprof -mutexprofile=mutex.pprof -blockprofile=block.pprof -v ./pkg/v2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hed-v2-profiles-${{ github.sha }}
+          path: '*.pprof'
