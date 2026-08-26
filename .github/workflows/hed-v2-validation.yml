@@ -18,6 +18,7 @@ permissions:
 env:
   GOTOOLCHAIN: local
   GO_VERSION: '1.26.6'
+  GOFLAGS: '-mod=mod'
 
 jobs:
   correctness:
