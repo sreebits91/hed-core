@@ -3,24 +3,27 @@ package hlf
 import "time"
 
 const (
-	// Default Hyperledger Fabric Settings
-	DefaultFabricVersion = "2.5.4"
+	// Default Hyperledger Fabric settings.
+	DefaultFabricVersion = "2.5.16"
 	DefaultChannelID     = "mychannel"
 	DefaultChaincodeName = "basic"
 	DefaultChaincodePath = "../asset-transfer-basic/chaincode-go"
 	DefaultChaincodeLang = "go"
 
-	// Self-Healing Constraints
+	// Self-healing / compatibility constraints.
 	TargetGoVersion     = "1.22"
 	MaxAllowedGoVersion = "1.23"
 
-	// Directory Paths
-	FabricSamplesDir = "fabric-samples"
-	TestNetworkDir   = "fabric-samples/test-network"
-	CommandTimeout   = 5 * time.Minute
+	// Fabric is runtime state, not repository state. Keeping it outside the
+	// checkout prevents stale Fabric trees/submodules from contaminating CI.
+	FabricRuntimeDir = ".hed/fabric-samples"
+	FabricSamplesDir = FabricRuntimeDir
+	TestNetworkDir   = FabricRuntimeDir + "/test-network"
+
+	CommandTimeout = 5 * time.Minute
 )
 
-// DeployOptions holds customizable pipeline settings passed from UI or default constants
+// DeployOptions holds customizable pipeline settings passed from the UI or defaults.
 type DeployOptions struct {
 	FabricVersion string   `json:"fabricVersion"`
 	ChannelID     string   `json:"channelId"`
