@@ -1,6 +1,8 @@
 module hed-core
 
-go 1.26.1
+go 1.26.6
+
+toolchain go1.26.6
 
 require (
 	github.com/go-redis/redis/v8 v8.11.5
@@ -23,7 +25,7 @@ require (
 	github.com/hyperledger/fabric-chaincode-go v0.0.0-20230731094759-d626e9ab09b9 // indirect
 	github.com/hyperledger/fabric-protos-go v0.3.7 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
-	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/pgservicefile v1.0.0 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
