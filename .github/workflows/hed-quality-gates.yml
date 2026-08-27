@@ -10,6 +10,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GOFLAGS: -mod=mod
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -73,7 +76,7 @@ jobs:
       - name: 100K benchmark smoke
         run: |
           set -euo pipefail
-          go test -run '^$' -bench '^BenchmarkHLFLoad100K$' -benchtime=1x -count=1 ./pkg/hlf | tee benchmark-100K.txt
+          GOFLAGS=-mod=mod go test -run '^$' -bench '^BenchmarkHLFLoad100K$' -benchtime=1x -count=1 ./pkg/hlf | tee benchmark-100K.txt
           grep -Eq 'BenchmarkHLFLoad100K[[:space:]]+[0-9]+' benchmark-100K.txt
       - name: Upload benchmark
         if: always()
