@@ -9,7 +9,7 @@ import (
 
 func BenchmarkRun256Workers(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		engine := delta.NewDeltaEngine()
+		engine := delta.New(nil)
 		result := Run256WorkerBenchmark(context.Background(), engine, 2560, 256)
 		if result.TotalTx != 2560 {
 			b.Fatalf("committed transactions = %d, want 2560", result.TotalTx)
@@ -18,7 +18,7 @@ func BenchmarkRun256Workers(b *testing.B) {
 }
 
 func TestRun256WorkerBenchmark(t *testing.T) {
-	engine := delta.NewDeltaEngine()
+	engine := delta.New(nil)
 	result := Run256WorkerBenchmark(context.Background(), engine, 2560, 256)
 	if result.TotalTx != 2560 {
 		t.Fatalf("committed transactions = %d, want 2560", result.TotalTx)
