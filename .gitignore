@@ -6,6 +6,12 @@
 *.so
 *.dylib
 
+# HED/Fabric runtime state
+.hed/
+
+# Profiling output
+profiling/
+
 # IDE & OS files
 .DS_Store
 .idea/
