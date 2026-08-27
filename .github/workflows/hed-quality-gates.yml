@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: false
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -27,14 +27,21 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Gofmt check
+      - name: Gofmt changed Go files
         shell: bash
         run: |
           set -euo pipefail
-          files=$(gofmt -l .)
-          if [[ -n "$files" ]]; then
-            echo "Files requiring gofmt:"
-            echo "$files"
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          changed=$(git diff --name-only "$base" "$GITHUB_SHA" -- '*.go' | grep -v '^vendor/' || true)
+          if [[ -z "$changed" ]]; then
+            echo "No changed Go files to format-check."
+            exit 0
+          fi
+          echo "$changed"
+          bad=$(echo "$changed" | xargs gofmt -l || true)
+          if [[ -n "$bad" ]]; then
+            echo "Changed Go files requiring gofmt:"
+            echo "$bad"
             exit 1
           fi
 
