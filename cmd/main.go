@@ -102,10 +102,8 @@ func main() {
 	fmt.Printf(" Alice Balance (Db)   : %s cents (-$500.00)\n", string(aliceBalBytes))
 	fmt.Printf(" Bob Balance (Db)     : %s cents (+$499.50)\n", string(bobBalBytes))
 	fmt.Printf(" Treasury Balance(Db) : %s cents (+$0.50)\n", string(treasuryBalBytes))
-	fmt.Println("=======================================================\n")
+	fmt.Println("=======================================================")
 
-	go func() {
-		<-sigChan
-		cancel()
-	}()
+	<-sigChan
+	cancel()
 }
