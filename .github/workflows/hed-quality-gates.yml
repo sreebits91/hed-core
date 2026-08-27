@@ -24,6 +24,16 @@ jobs:
           submodules: false
           fetch-depth: 0
 
+      - name: Remove legacy Fabric gitlink
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-files --stage -- fabric-samples | grep -q '^160000 '; then
+            git update-index --force-remove fabric-samples
+          fi
+          rm -rf fabric-samples
+          rm -f .gitmodules
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
