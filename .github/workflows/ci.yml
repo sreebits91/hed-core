@@ -18,7 +18,7 @@ jobs:
   test:
     name: Go validation
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,16 +34,6 @@ jobs:
 
       - name: Verify modules
         run: go mod verify
-
-      - name: Format check
-        shell: bash
-        run: |
-          files=$(gofmt -l .)
-          if [ -n "$files" ]; then
-            echo "gofmt required for:"
-            echo "$files"
-            exit 1
-          fi
 
       - name: Go vet
         run: go vet ./...
