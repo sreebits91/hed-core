@@ -24,8 +24,11 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.26.6'
           cache: true
+
+      - name: Verify toolchain
+        run: go version
 
       - name: Gofmt changed Go files
         shell: bash
@@ -33,30 +36,18 @@ jobs:
           set -euo pipefail
           base="${{ github.event.pull_request.base.sha || github.event.before }}"
           changed=$(git diff --name-only "$base" "$GITHUB_SHA" -- '*.go' | grep -v '^vendor/' || true)
-          if [[ -z "$changed" ]]; then
-            echo "No changed Go files to format-check."
-            exit 0
-          fi
-          echo "$changed"
+          if [[ -z "$changed" ]]; then exit 0; fi
           bad=$(echo "$changed" | xargs gofmt -l || true)
-          if [[ -n "$bad" ]]; then
-            echo "Changed Go files requiring gofmt:"
-            echo "$bad"
-            exit 1
-          fi
+          if [[ -n "$bad" ]]; then echo "$bad"; exit 1; fi
 
       - name: Go vet
         run: go vet ./...
-
       - name: Unit tests
         run: go test ./...
-
       - name: Race tests
         run: go test -race ./pkg/hlf ./pkg/engine ./pkg/dashboard
-
       - name: Load-level regression
         run: go test -run '^TestHLFLoadLevels$' -v ./pkg/hlf
-
       - name: Security scan
         shell: bash
         run: |
@@ -74,19 +65,16 @@ jobs:
         with:
           submodules: false
           fetch-depth: 1
-
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.26.6'
           cache: true
-
       - name: 100K benchmark smoke
         run: |
           set -euo pipefail
           go test -run '^$' -bench '^BenchmarkHLFLoad100K$' -benchtime=1x -count=1 ./pkg/hlf | tee benchmark-100K.txt
           grep -Eq 'BenchmarkHLFLoad100K[[:space:]]+[0-9]+' benchmark-100K.txt
-
       - name: Upload benchmark
         if: always()
         uses: actions/upload-artifact@v4
