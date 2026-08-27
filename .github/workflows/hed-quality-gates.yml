@@ -1,0 +1,89 @@
+name: HED Quality Gates
+
+on:
+  push:
+    branches: [main, "fix/**", "perf/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Gofmt check
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=$(gofmt -l .)
+          if [[ -n "$files" ]]; then
+            echo "Files requiring gofmt:"
+            echo "$files"
+            exit 1
+          fi
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Race tests
+        run: go test -race ./pkg/hlf ./pkg/engine ./pkg/dashboard
+
+      - name: Load-level regression
+        run: go test -run '^TestHLFLoadLevels$' -v ./pkg/hlf
+
+      - name: Security scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  benchmark-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: verify
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 100K benchmark smoke
+        run: |
+          set -euo pipefail
+          go test -run '^$' -bench '^BenchmarkHLFLoad100K$' -benchtime=1x -count=1 ./pkg/hlf | tee benchmark-100K.txt
+          grep -Eq 'BenchmarkHLFLoad100K[[:space:]]+[0-9]+' benchmark-100K.txt
+
+      - name: Upload benchmark
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hed-quality-benchmark
+          path: benchmark-100K.txt
+          if-no-files-found: error
