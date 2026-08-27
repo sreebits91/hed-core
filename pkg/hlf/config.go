@@ -14,11 +14,11 @@ const (
 	TargetGoVersion     = "1.22"
 	MaxAllowedGoVersion = "1.23"
 
-	// Fabric is runtime state, not repository state. Keeping it outside the
-	// checkout prevents stale Fabric trees/submodules from contaminating CI.
-	FabricRuntimeDir = ".hed/fabric-samples"
-	FabricSamplesDir = FabricRuntimeDir
-	TestNetworkDir   = FabricRuntimeDir + "/test-network"
+	// Fabric is runtime state, not repository state. Keeping it under .hed
+	// prevents stale Fabric trees/submodules from contaminating the checkout.
+	FabricRuntimeDir = ".hed"
+	FabricSamplesDir = FabricRuntimeDir + "/fabric-samples"
+	TestNetworkDir   = FabricSamplesDir + "/test-network"
 
 	CommandTimeout = 5 * time.Minute
 )
