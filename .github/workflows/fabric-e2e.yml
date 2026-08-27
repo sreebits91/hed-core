@@ -8,19 +8,41 @@ on:
 permissions:
   contents: read
 
+env:
+  FABRIC_VERSION: '3.1.5'
+  FABRIC_CA_VERSION: '1.5.17'
+
 jobs:
   fabric-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout HED with the pinned fabric-samples submodule
+        uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Install Fabric binaries and images
-        working-directory: fabric-samples
-        run: ./install-fabric.sh docker binary
+      - name: Validate checked-out fabric-samples tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$GITHUB_WORKSPACE/fabric-samples/test-network"
+          test -x "$GITHUB_WORKSPACE/fabric-samples/test-network/network.sh"
+          echo "fabric-samples submodule:"
+          git -C "$GITHUB_WORKSPACE/fabric-samples" rev-parse HEAD
+          echo "test-network: $GITHUB_WORKSPACE/fabric-samples/test-network"
+
+      - name: Install Fabric binaries and Docker images without replacing fabric-samples
+        shell: bash
+        run: |
+          set -euo pipefail
+          INSTALLER="$RUNNER_TEMP/install-fabric.sh"
+          curl -fsSL https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh -o "$INSTALLER"
+          chmod +x "$INSTALLER"
+          "$INSTALLER" --fabric-version "$FABRIC_VERSION" --ca-version "$FABRIC_CA_VERSION" binary docker
+          test -x "$GITHUB_WORKSPACE/fabric-samples/bin/peer"
+          test -x "$GITHUB_WORKSPACE/fabric-samples/bin/orderer"
 
       - name: Start Fabric network and create channel
         working-directory: fabric-samples/test-network
@@ -30,15 +52,18 @@ jobs:
         working-directory: fabric-samples/test-network
         run: ./network.sh deployCC -ccn hed -ccp "$GITHUB_WORKSPACE/chaincode" -ccl go
 
-      - name: Configure peer CLI
+      - name: Configure peer CLI from checked-out fabric-samples
+        shell: bash
         run: |
+          set -euo pipefail
+          FABRIC_SAMPLES="$GITHUB_WORKSPACE/fabric-samples"
           echo "CORE_PEER_TLS_ENABLED=true" >> "$GITHUB_ENV"
           echo "CORE_PEER_LOCALMSPID=Org1MSP" >> "$GITHUB_ENV"
-          echo "CORE_PEER_TLS_ROOTCERT_FILE=$GITHUB_WORKSPACE/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt" >> "$GITHUB_ENV"
-          echo "CORE_PEER_MSPCONFIGPATH=$GITHUB_WORKSPACE/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp" >> "$GITHUB_ENV"
-          echo "ORDERER_CA=$GITHUB_WORKSPACE/fabric-samples/test-network/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem" >> "$GITHUB_ENV"
-          echo "PATH=$GITHUB_WORKSPACE/fabric-samples/bin:$PATH" >> "$GITHUB_ENV"
-          echo "FABRIC_CFG_PATH=$GITHUB_WORKSPACE/fabric-samples/config" >> "$GITHUB_ENV"
+          echo "CORE_PEER_TLS_ROOTCERT_FILE=$FABRIC_SAMPLES/test-network/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt" >> "$GITHUB_ENV"
+          echo "CORE_PEER_MSPCONFIGPATH=$FABRIC_SAMPLES/test-network/organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp" >> "$GITHUB_ENV"
+          echo "ORDERER_CA=$FABRIC_SAMPLES/test-network/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem" >> "$GITHUB_ENV"
+          echo "PATH=$FABRIC_SAMPLES/bin:$PATH" >> "$GITHUB_ENV"
+          echo "FABRIC_CFG_PATH=$FABRIC_SAMPLES/config" >> "$GITHUB_ENV"
 
       - name: Commit and query through Fabric
         shell: bash
@@ -92,6 +117,7 @@ jobs:
         with:
           name: fabric-e2e-diagnostics
           path: artifacts/
+          if-no-files-found: warn
 
       - name: Tear down Fabric
         if: always()
