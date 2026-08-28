@@ -87,7 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           GOFLAGS=-mod=mod go test -run '^$' -bench '^BenchmarkHLFLoad100K$' -benchtime=1x -count=1 ./pkg/hlf | tee benchmark-100K.txt
-          grep -Eq 'BenchmarkHLFLoad100K[[:space:]]+[0-9]+' benchmark-100K.txt
+          grep -Eq 'BenchmarkHLFLoad100K(-[0-9]+)?[[:space:]]+[0-9]+' benchmark-100K.txt
       - name: Upload benchmark
         if: always()
         uses: actions/upload-artifact@v4
