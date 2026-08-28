@@ -19,6 +19,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GOFLAGS: -mod=mod
+
 jobs:
   profiling:
     runs-on: ubuntu-latest
@@ -68,8 +71,8 @@ jobs:
           BENCH="BenchmarkHLFLoad${PROFILE_LEVEL}"
           mkdir -p "$PROFILE_DIR"
 
-          echo "Running ${BENCH} for 30 seconds"
-          go test -run '^$' -bench "^${BENCH}$" -benchtime=30s -count=1 -benchmem \
+          echo "Running one deterministic ${BENCH} load"
+          go test -run '^$' -bench "^${BENCH}$" -benchtime=1x -count=1 -benchmem \
             -cpuprofile="$PROFILE_DIR/cpu.pprof" \
             -memprofile="$PROFILE_DIR/heap.pprof" \
             -mutexprofile="$PROFILE_DIR/mutex.pprof" \
