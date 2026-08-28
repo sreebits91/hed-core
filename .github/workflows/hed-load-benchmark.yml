@@ -6,13 +6,19 @@ on:
 permissions:
   contents: read
 
+env:
+  GOFLAGS: -mod=mod
+
 jobs:
   load-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -36,7 +42,10 @@ jobs:
         run: go test -run '^TestHLFLoadLevels$' -v ./pkg/hlf
 
       - name: Throughput benchmarks
-        run: go test -run '^$' -bench '^BenchmarkHLFLoad(100K|250K|500K)$' -benchtime=1x -count=1 -timeout=10m ./pkg/hlf | tee hed-load-benchmark.txt
+        run: |
+          set -euo pipefail
+          go test -run '^$' -bench '^BenchmarkHLFLoad(100K|250K|500K)$' -benchtime=1x -count=1 -timeout=15m ./pkg/hlf | tee hed-load-benchmark.txt
+          grep -Eq 'BenchmarkHLFLoad(100K|250K|500K)(-[0-9]+)?[[:space:]]+[0-9]+' hed-load-benchmark.txt
 
       - name: Upload benchmark result
         if: always()
@@ -44,4 +53,4 @@ jobs:
         with:
           name: hed-load-benchmark
           path: hed-load-benchmark.txt
-          if-no-files-found: warn
+          if-no-files-found: error

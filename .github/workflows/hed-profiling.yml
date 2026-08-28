@@ -1,6 +1,8 @@
 name: HED Profiling
 
 on:
+  push:
+    branches: ["fix/hed-core-stability-phase"]
   workflow_dispatch:
     inputs:
       profile_level:
@@ -10,6 +12,7 @@ on:
         type: choice
         options:
           - "100K"
+          - "250K"
           - "500K"
           - "1M"
           - "2M"
@@ -18,6 +21,10 @@ on:
 permissions:
   contents: read
 
+env:
+  GOFLAGS: -mod=mod
+  PROFILE_LEVEL: ${{ inputs.profile_level || '100K' }}
+
 jobs:
   profiling:
     runs-on: ubuntu-latest
@@ -25,6 +32,19 @@ jobs:
     steps:
       - name: Checkout selected benchmark ref
         uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Remove legacy Fabric gitlink
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-files --stage -- fabric-samples | grep -q '^160000 '; then
+            git update-index --force-remove fabric-samples
+          fi
+          rm -rf fabric-samples
+          rm -f .gitmodules
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -41,52 +61,57 @@ jobs:
       - name: Unit tests
         run: go test ./...
 
+      - name: Race tests
+        run: go test -race ./pkg/hlf ./pkg/engine
+
       - name: Validate requested benchmark exists
-        env:
-          PROFILE_LEVEL: ${{ inputs.profile_level }}
         run: |
           set -euo pipefail
           mkdir -p profiling
           BENCH="BenchmarkHLFLoad${PROFILE_LEVEL}"
           echo "Requested benchmark: ${BENCH}"
-          go test -list '^BenchmarkHLFLoad' ./pkg/hlf | tee profiling-benchmarks.txt
-          grep -Fx "${BENCH}" profiling-benchmarks.txt
+          go test -list '^BenchmarkHLFLoad' ./pkg/hlf | tee profiling/benchmarks.txt
+          grep -Fx "${BENCH}" profiling/benchmarks.txt
 
       - name: CPU, heap, allocation, mutex and block profiles
-        env:
-          PROFILE_LEVEL: ${{ inputs.profile_level }}
         run: |
           set -euo pipefail
+          PROFILE_DIR="$GITHUB_WORKSPACE/profiling"
           BENCH="BenchmarkHLFLoad${PROFILE_LEVEL}"
-          echo "Running ${BENCH} for 30 seconds"
-          go test -run '^$' -bench "^${BENCH}$" -benchtime=30s -count=1 -benchmem \
-            -cpuprofile=profiling/cpu.pprof \
-            -memprofile=profiling/heap.pprof \
-            -mutexprofile=profiling/mutex.pprof \
-            -blockprofile=profiling/block.pprof \
-            ./pkg/hlf | tee profiling/benchmark.txt
+          mkdir -p "$PROFILE_DIR"
 
-          grep -Eq "${BENCH}[[:space:]]+[0-9]+" profiling/benchmark.txt
+          echo "Running one deterministic ${BENCH} load"
+          go test -run '^$' -bench "^${BENCH}$" -benchtime=1x -count=1 -benchmem \
+            -cpuprofile="$PROFILE_DIR/cpu.pprof" \
+            -memprofile="$PROFILE_DIR/heap.pprof" \
+            -mutexprofile="$PROFILE_DIR/mutex.pprof" \
+            -blockprofile="$PROFILE_DIR/block.pprof" \
+            ./pkg/hlf > "$PROFILE_DIR/benchmark.txt"
 
-          test -s profiling/cpu.pprof
-          test -s profiling/heap.pprof
-          test -s profiling/mutex.pprof
-          test -s profiling/block.pprof
+          cat "$PROFILE_DIR/benchmark.txt"
+          find "$PROFILE_DIR" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+          grep -Eq "${BENCH}(-[0-9]+)?[[:space:]]+[0-9]+" "$PROFILE_DIR/benchmark.txt"
+          for profile in cpu.pprof heap.pprof mutex.pprof block.pprof; do
+            test -s "$PROFILE_DIR/$profile"
+          done
 
       - name: Generate profile summaries
         run: |
           set -euo pipefail
-          go tool pprof -top profiling/cpu.pprof | tee profiling/cpu-top.txt
-          go tool pprof -top profiling/heap.pprof | tee profiling/heap-top.txt
-          go tool pprof -top -alloc_objects profiling/heap.pprof | tee profiling/alloc-top.txt
-          go tool pprof -top profiling/mutex.pprof | tee profiling/mutex-top.txt
-          go tool pprof -top profiling/block.pprof | tee profiling/block-top.txt
+          go tool pprof -top profiling/cpu.pprof > profiling/cpu-top.txt
+          go tool pprof -top profiling/heap.pprof > profiling/heap-top.txt
+          go tool pprof -top -alloc_objects profiling/heap.pprof > profiling/alloc-top.txt
+          go tool pprof -top profiling/mutex.pprof > profiling/mutex-top.txt
+          go tool pprof -top profiling/block.pprof > profiling/block-top.txt
+          cat profiling/cpu-top.txt
+          cat profiling/alloc-top.txt
+          cat profiling/mutex-top.txt
+          cat profiling/block-top.txt
 
       - name: Upload profiling artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hed-profiles-${{ inputs.profile_level }}
-          path: |
-            profiling/
+          name: hed-profiles-${{ env.PROFILE_LEVEL }}
+          path: profiling/
           if-no-files-found: error
