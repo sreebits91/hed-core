@@ -1,6 +1,8 @@
 name: HED Profiling
 
 on:
+  push:
+    branches: ["fix/hed-core-stability-phase"]
   workflow_dispatch:
     inputs:
       profile_level:
@@ -21,6 +23,7 @@ permissions:
 
 env:
   GOFLAGS: -mod=mod
+  PROFILE_LEVEL: ${{ inputs.profile_level || '100K' }}
 
 jobs:
   profiling:
@@ -32,6 +35,16 @@ jobs:
         with:
           submodules: false
           fetch-depth: 1
+
+      - name: Remove legacy Fabric gitlink
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-files --stage -- fabric-samples | grep -q '^160000 '; then
+            git update-index --force-remove fabric-samples
+          fi
+          rm -rf fabric-samples
+          rm -f .gitmodules
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -52,19 +65,15 @@ jobs:
         run: go test -race ./pkg/hlf ./pkg/engine
 
       - name: Validate requested benchmark exists
-        env:
-          PROFILE_LEVEL: ${{ inputs.profile_level }}
         run: |
           set -euo pipefail
           mkdir -p profiling
           BENCH="BenchmarkHLFLoad${PROFILE_LEVEL}"
           echo "Requested benchmark: ${BENCH}"
-          go test -list '^BenchmarkHLFLoad' ./pkg/hlf | tee profiling-benchmarks.txt
-          grep -Fx "${BENCH}" profiling-benchmarks.txt
+          go test -list '^BenchmarkHLFLoad' ./pkg/hlf | tee profiling/benchmarks.txt
+          grep -Fx "${BENCH}" profiling/benchmarks.txt
 
       - name: CPU, heap, allocation, mutex and block profiles
-        env:
-          PROFILE_LEVEL: ${{ inputs.profile_level }}
         run: |
           set -euo pipefail
           PROFILE_DIR="$GITHUB_WORKSPACE/profiling"
@@ -80,10 +89,8 @@ jobs:
             ./pkg/hlf > "$PROFILE_DIR/benchmark.txt"
 
           cat "$PROFILE_DIR/benchmark.txt"
-          echo "=== profiling directory ==="
           find "$PROFILE_DIR" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
-
-          grep -Eq "${BENCH}[[:space:]]+[0-9]+" "$PROFILE_DIR/benchmark.txt"
+          grep -Eq "${BENCH}(-[0-9]+)?[[:space:]]+[0-9]+" "$PROFILE_DIR/benchmark.txt"
           for profile in cpu.pprof heap.pprof mutex.pprof block.pprof; do
             test -s "$PROFILE_DIR/$profile"
           done
@@ -105,6 +112,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hed-profiles-${{ inputs.profile_level }}
+          name: hed-profiles-${{ env.PROFILE_LEVEL }}
           path: profiling/
           if-no-files-found: error
