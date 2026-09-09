@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -161,5 +162,5 @@ func (p *Pipeline) EmitEvent(typ EventType, shard, txUUID, msg string, latUs int
 }
 
 func GenerateUUID() string {
-	return fmt.Sprintf("%x", time.Now().UnixNano())
+	return strconv.FormatInt(time.Now().UnixNano(), 16)
 }
