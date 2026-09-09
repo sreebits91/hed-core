@@ -2,6 +2,7 @@ package hlf
 
 import (
 	"context"
+	"hash/fnv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,10 +15,11 @@ type BatchConfig struct {
 	FlushTimeout time.Duration
 	WorkerCount  int
 	QueueSize    int
+	Partitions   int
 }
 
 type HLFCommitter struct {
-	txQueue   chan *engine.TxPayload
+	txQueues  []chan *engine.TxPayload
 	committed uint64
 	failed    uint64
 	dropped   uint64
@@ -42,13 +44,27 @@ func NewHLFCommitter(cfg BatchConfig) *HLFCommitter {
 	if cfg.QueueSize <= 0 {
 		cfg.QueueSize = 500000
 	}
+	if cfg.Partitions <= 0 {
+		cfg.Partitions = 8
+	}
+	if cfg.Partitions > cfg.WorkerCount {
+		cfg.Partitions = cfg.WorkerCount
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &HLFCommitter{
-		txQueue: make(chan *engine.TxPayload, cfg.QueueSize),
-		cfg:     cfg,
-		ctx:     ctx,
-		cancel:  cancel,
+		txQueues: make([]chan *engine.TxPayload, cfg.Partitions),
+		cfg:      cfg,
+		ctx:      ctx,
+		cancel:   cancel,
+	}
+
+	queueSize := cfg.QueueSize / cfg.Partitions
+	if queueSize < 1 {
+		queueSize = 1
+	}
+	for i := range c.txQueues {
+		c.txQueues[i] = make(chan *engine.TxPayload, queueSize)
 	}
 	c.startWorkers()
 	return c
@@ -56,12 +72,13 @@ func NewHLFCommitter(cfg BatchConfig) *HLFCommitter {
 
 func (c *HLFCommitter) startWorkers() {
 	for i := 0; i < c.cfg.WorkerCount; i++ {
+		partition := i % len(c.txQueues)
 		c.wg.Add(1)
-		go c.workerLoop()
+		go c.workerLoop(c.txQueues[partition])
 	}
 }
 
-func (c *HLFCommitter) workerLoop() {
+func (c *HLFCommitter) workerLoop(queue <-chan *engine.TxPayload) {
 	defer c.wg.Done()
 
 	batch := make([]*engine.TxPayload, 0, c.cfg.MaxBatchSize)
@@ -79,9 +96,23 @@ func (c *HLFCommitter) workerLoop() {
 	for {
 		select {
 		case <-c.ctx.Done():
-			flush()
-			return
-		case tx := <-c.txQueue:
+			// Drain this partition before exiting so Stop provides a deterministic
+			// handoff boundary rather than abandoning already accepted work.
+			for {
+				select {
+				case tx := <-queue:
+					if tx != nil {
+						batch = append(batch, tx)
+						if len(batch) >= c.cfg.MaxBatchSize {
+							flush()
+						}
+					}
+				default:
+					flush()
+					return
+				}
+			}
+		case tx := <-queue:
 			if tx == nil {
 				continue
 			}
@@ -95,26 +126,33 @@ func (c *HLFCommitter) workerLoop() {
 	}
 }
 
-// SubmitTx performs a bounded, non-blocking enqueue. The benchmark producer
-// never waits behind a saturated committer queue; saturation is observable via
-// TotalDropped rather than silently being counted as committed.
+// SubmitTx performs a bounded, non-blocking enqueue. Transactions are routed
+// deterministically to partitions so producers do not contend on one global
+// queue and the same transaction key remains on the same queue.
 func (c *HLFCommitter) SubmitTx(tx *engine.TxPayload) bool {
 	if tx == nil || c.stopped.Load() {
 		atomic.AddUint64(&c.failed, 1)
 		return false
 	}
 
+	partition := c.partitionFor(tx)
 	select {
 	case <-c.ctx.Done():
 		atomic.AddUint64(&c.failed, 1)
 		return false
-	case c.txQueue <- tx:
+	case c.txQueues[partition] <- tx:
 		return true
 	default:
 		atomic.AddUint64(&c.failed, 1)
 		atomic.AddUint64(&c.dropped, 1)
 		return false
 	}
+}
+
+func (c *HLFCommitter) partitionFor(tx *engine.TxPayload) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(tx.TxUUID))
+	return int(h.Sum32() % uint32(len(c.txQueues)))
 }
 
 func (c *HLFCommitter) flushBatch(batch []*engine.TxPayload) {
@@ -137,11 +175,19 @@ func (c *HLFCommitter) TotalDropped() uint64 {
 }
 
 func (c *HLFCommitter) QueueDepth() int {
-	return len(c.txQueue)
+	total := 0
+	for _, q := range c.txQueues {
+		total += len(q)
+	}
+	return total
 }
 
 func (c *HLFCommitter) QueueCapacity() int {
-	return cap(c.txQueue)
+	total := 0
+	for _, q := range c.txQueues {
+		total += cap(q)
+	}
+	return total
 }
 
 func (c *HLFCommitter) Stop() {

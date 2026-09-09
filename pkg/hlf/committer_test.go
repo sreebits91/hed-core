@@ -8,7 +8,7 @@ import (
 )
 
 func TestHLFCommitterBatchesAndStops(t *testing.T) {
-	c := NewHLFCommitter(BatchConfig{MaxBatchSize: 64, FlushTimeout: time.Millisecond, WorkerCount: 4, QueueSize: 1024})
+	c := NewHLFCommitter(BatchConfig{MaxBatchSize: 64, FlushTimeout: time.Millisecond, WorkerCount: 4, QueueSize: 20000})
 
 	const total = 10000
 	for i := 0; i < total; i++ {
