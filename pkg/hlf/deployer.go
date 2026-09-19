@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -97,8 +98,6 @@ func (d *Deployer) serializeStages() string {
 	return buf.String()
 }
 
-// RunDeployment preserves the original API while applying the configured
-// deployment timeout. Call RunDeploymentContext when the caller owns a context.
 func (d *Deployer) RunDeployment() {
 	ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
 	defer cancel()
@@ -108,7 +107,7 @@ func (d *Deployer) RunDeployment() {
 }
 
 // RunDeploymentContext executes the Fabric lifecycle sequentially and fails fast.
-// A failed stage is returned to the caller and later stages are not executed.
+// Fabric is always installed into a clean runtime directory outside the git tree.
 func (d *Deployer) RunDeploymentContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -118,47 +117,66 @@ func (d *Deployer) RunDeploymentContext(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("resolve working directory: %w", err)
 	}
-	binPath := absPath + "/fabric-samples/bin"
-	configPath := absPath + "/fabric-samples/config"
+
+	runtimeDir := filepath.Join(absPath, FabricRuntimeDir)
+	fabricDir := filepath.Join(absPath, FabricSamplesDir)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// Remove the previous runtime completely. This deliberately avoids reusing
+	// stale Fabric binaries, ledgers, containers, or git metadata.
+	if err := os.RemoveAll(runtimeDir); err != nil {
+		return fmt.Errorf("reset Fabric runtime: %w", err)
+	}
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		return fmt.Errorf("create Fabric runtime: %w", err)
+	}
+
+	binPath := filepath.Join(fabricDir, "bin")
+	configPath := filepath.Join(fabricDir, "config")
 	envVars := append(os.Environ(),
 		"PATH="+os.Getenv("PATH")+":"+binPath,
 		"FABRIC_CFG_PATH="+configPath,
 	)
 
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
 	if err := d.executeStage(ctx, 0, func(ctx context.Context) error {
-		return d.runCmdContext(ctx, "docker", "version")
+		if err := d.runCmdContext(ctx, "docker", "version"); err != nil {
+			return fmt.Errorf("docker unavailable: %w", err)
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
 
 	if err := d.executeStage(ctx, 1, func(ctx context.Context) error {
-		if err := os.MkdirAll(FabricSamplesDir, 0755); err != nil {
-			return fmt.Errorf("failed to create fabric-samples dir: %w", err)
+		installScript := filepath.Join(runtimeDir, "install-fabric.sh")
+		installURL := "https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh"
+		download := exec.CommandContext(ctx, "curl", "-fsSL", "--retry", "5", "--retry-delay", "2", installURL, "-o", installScript)
+		if out, err := download.CombinedOutput(); err != nil {
+			return fmt.Errorf("download Fabric installer: %w: %s", err, string(out))
 		}
-
-		dlScript := "if [ ! -f fabric-samples/install-fabric.sh ]; then curl -sSL https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh -o fabric-samples/install-fabric.sh && chmod +x fabric-samples/install-fabric.sh; fi"
-		dlCmd := exec.CommandContext(ctx, "sh", "-c", dlScript)
-		if out, err := dlCmd.CombinedOutput(); err != nil {
-			d.broadcast(string(out))
-			return fmt.Errorf("failed to fetch install-fabric.sh: %w", err)
+		if err := os.Chmod(installScript, 0755); err != nil {
+			return fmt.Errorf("make Fabric installer executable: %w", err)
 		}
 
 		cmd := exec.CommandContext(ctx, "./install-fabric.sh", "docker", "binary", "-f", d.opts.FabricVersion)
-		cmd.Dir = FabricSamplesDir
-		return d.streamCmdOutput(cmd)
+		cmd.Dir = runtimeDir
+		if err := d.streamCmdOutput(cmd); err != nil {
+			return fmt.Errorf("install Fabric %s: %w", d.opts.FabricVersion, err)
+		}
+		if _, err := os.Stat(filepath.Join(fabricDir, "test-network", "network.sh")); err != nil {
+			return fmt.Errorf("Fabric installation incomplete: test-network/network.sh not found: %w", err)
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
 
 	if err := d.executeStage(ctx, 2, func(ctx context.Context) error {
 		cleanCmd := exec.CommandContext(ctx, "./network.sh", "down")
-		cleanCmd.Dir = TestNetworkDir
+		cleanCmd.Dir = filepath.Join(fabricDir, "test-network")
 		cleanCmd.Env = envVars
-		// Teardown is best-effort, but cancellation is never ignored.
 		if err := d.streamCmdOutput(cleanCmd); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -167,7 +185,7 @@ func (d *Deployer) RunDeploymentContext(ctx context.Context) error {
 		}
 
 		upCmd := exec.CommandContext(ctx, "./network.sh", "up", "-ca")
-		upCmd.Dir = TestNetworkDir
+		upCmd.Dir = filepath.Join(fabricDir, "test-network")
 		upCmd.Env = envVars
 		return d.streamCmdOutput(upCmd)
 	}); err != nil {
@@ -178,7 +196,7 @@ func (d *Deployer) RunDeploymentContext(ctx context.Context) error {
 		channels := d.channels()
 		for _, channelID := range channels {
 			cmd := exec.CommandContext(ctx, "./network.sh", "createChannel", "-c", channelID)
-			cmd.Dir = TestNetworkDir
+			cmd.Dir = filepath.Join(fabricDir, "test-network")
 			cmd.Env = envVars
 			if err := d.streamCmdOutput(cmd); err != nil {
 				return fmt.Errorf("create channel %q: %w", channelID, err)
@@ -190,7 +208,7 @@ func (d *Deployer) RunDeploymentContext(ctx context.Context) error {
 	}
 
 	return d.executeStage(ctx, 4, func(ctx context.Context) error {
-		ccDir := FabricSamplesDir + "/asset-transfer-basic/chaincode-go"
+		ccDir := filepath.Join(fabricDir, "asset-transfer-basic", "chaincode-go")
 		targetVer := d.opts.TargetGoVer
 		if targetVer == "" {
 			targetVer = TargetGoVersion
@@ -202,7 +220,6 @@ func (d *Deployer) RunDeploymentContext(ctx context.Context) error {
 				sed -i 's/go 1.24/%s/g' go.mod || true
 			fi
 		`, targetVer, targetVer)
-
 		fixCmd := exec.CommandContext(ctx, "sh", "-c", fixScript)
 		fixCmd.Dir = ccDir
 		if err := fixCmd.Run(); err != nil && ctx.Err() != nil {
@@ -225,7 +242,7 @@ func (d *Deployer) RunDeploymentContext(ctx context.Context) error {
 				"-ccp", DefaultChaincodePath,
 				"-ccl", DefaultChaincodeLang,
 			)
-			cmd.Dir = TestNetworkDir
+			cmd.Dir = filepath.Join(fabricDir, "test-network")
 			cmd.Env = envVars
 			if err := d.streamCmdOutput(cmd); err != nil {
 				return fmt.Errorf("deploy chaincode on channel %q: %w", channelID, err)
@@ -306,8 +323,5 @@ func (d *Deployer) streamCmdOutput(cmd *exec.Cmd) error {
 		}
 	}
 
-	if err := cmd.Wait(); err != nil {
-		return err
-	}
-	return nil
+	return cmd.Wait()
 }
