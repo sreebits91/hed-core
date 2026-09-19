@@ -3,6 +3,7 @@ package hlf
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -82,6 +83,18 @@ func (d *Deployer) broadcast(logLine string) {
 		default:
 		}
 	}
+}
+
+func (d *Deployer) eventPayload(logLine string) string {
+	payload := struct {
+		Stages []*DeploymentStage `json:"stages"`
+		Log    string             `json:"log"`
+	}{Stages: d.stages, Log: logLine}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return `{"stages":[],"log":"serialization error"}`
+	}
+	return string(b)
 }
 
 func (d *Deployer) serializeStages() string {
