@@ -28,6 +28,7 @@ type HLFCommitter struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	stopOnce  sync.Once
+	stopMu    sync.RWMutex
 	stopped   atomic.Bool
 }
 
@@ -130,11 +131,17 @@ func (c *HLFCommitter) workerLoop(queue <-chan *engine.TxPayload) {
 // deterministically to partitions so producers do not contend on one global
 // queue and the same transaction key remains on the same queue.
 func (c *HLFCommitter) SubmitTx(tx *engine.TxPayload) bool {
-	if tx == nil || c.stopped.Load() {
+	if tx == nil {
 		atomic.AddUint64(&c.failed, 1)
 		return false
 	}
 
+	c.stopMu.RLock()
+	defer c.stopMu.RUnlock()
+	if c.stopped.Load() {
+		atomic.AddUint64(&c.failed, 1)
+		return false
+	}
 	partition := c.partitionFor(tx)
 	select {
 	case <-c.ctx.Done():
@@ -192,8 +199,10 @@ func (c *HLFCommitter) QueueCapacity() int {
 
 func (c *HLFCommitter) Stop() {
 	c.stopOnce.Do(func() {
+		c.stopMu.Lock()
 		c.stopped.Store(true)
 		c.cancel()
+		c.stopMu.Unlock()
 		c.wg.Wait()
 	})
 }
