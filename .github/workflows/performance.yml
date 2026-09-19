@@ -1,0 +1,49 @@
+name: HED Performance Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/hed-v2-stability]
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.26.6'
+  GOTOOLCHAIN: local
+  GOFLAGS: '-mod=mod'
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go mod download
+      - run: go test -count=20 ./...
+
+  benchmark:
+    needs: stress
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go mod download
+      - name: Run real HED load smoke test
+        run: |
+          set -euo pipefail
+          go build -o /tmp/hed-loadtest ./cmd/loadtest
+          /tmp/hed-loadtest -tx 100000 -workers 256 | tee performance-smoke.txt
+          grep -Eq '^transactions=100000 .*workers=256 tps=[0-9]+(\.[0-9]+)?$' performance-smoke.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hed-performance-smoke
+          path: performance-smoke.txt

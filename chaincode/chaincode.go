@@ -6,19 +6,25 @@ import (
 	"github.com/hyperledger/fabric-contract-api-go/contractapi"
 )
 
-type SmartContract struct {
-	contractapi.Contract
+type SmartContract struct { contractapi.Contract }
+
+func (s *SmartContract) Commit(ctx contractapi.TransactionContextInterface, hedTxID string, payload string) error {
+	if hedTxID == "" { return fmt.Errorf("HED transaction ID is required") }
+	key, err := ctx.GetStub().CreateCompositeKey("HEDTx", []string{hedTxID}); if err != nil { return fmt.Errorf("create HED transaction key: %w", err) }
+	existing, err := ctx.GetStub().GetState(key); if err != nil { return fmt.Errorf("read HED transaction %s: %w", hedTxID, err) }
+	if existing != nil { return nil }
+	if err := ctx.GetStub().PutState(key, []byte(payload)); err != nil { return fmt.Errorf("write HED transaction %s: %w", hedTxID, err) }
+	return nil
 }
 
-// WriteStateDelta performs blind writes using composite keys (Shard + TxID)
-func (s *SmartContract) WriteStateDelta(ctx contractapi.TransactionContextInterface, shardID string, payload []byte) error {
-	txID := ctx.GetStub().GetTxID()
+func (s *SmartContract) GetByHEDID(ctx contractapi.TransactionContextInterface, hedTxID string) ([]byte, error) {
+	if hedTxID == "" { return nil, fmt.Errorf("HED transaction ID is required") }
+	key, err := ctx.GetStub().CreateCompositeKey("HEDTx", []string{hedTxID}); if err != nil { return nil, fmt.Errorf("create HED transaction key: %w", err) }
+	return ctx.GetStub().GetState(key)
+}
 
-	// Creates unique composite key -> Zero read-set contention across workers
-	compositeKey, err := ctx.GetStub().CreateCompositeKey("StateDelta", []string{shardID, txID})
-	if err != nil {
-		return fmt.Errorf("failed to create composite key: %w", err)
-	}
-
-	return ctx.GetStub().PutState(compositeKey, payload)
+func main() {
+	cc, err := contractapi.NewChaincode(&SmartContract{})
+	if err != nil { panic(fmt.Sprintf("create HED chaincode: %v", err)) }
+	if err := cc.Start(); err != nil { panic(fmt.Sprintf("start HED chaincode: %v", err)) }
 }

@@ -1,0 +1,128 @@
+name: HED E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/hed-v2-stability]
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.26.6'
+  GOTOOLCHAIN: local
+  GOFLAGS: '-mod=mod'
+
+jobs:
+  foundation:
+    name: Foundation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go mod download
+      - run: go mod verify
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go test -race ./...
+
+  stress:
+    name: Stress
+    needs: foundation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go mod download
+      - run: go test -count=20 ./...
+
+  benchmark:
+    name: Benchmark
+    needs: foundation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go mod download
+      - name: Run benchmarks when present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -Rqs --include='*_test.go' --exclude-dir=vendor 'func Benchmark' .; then
+            timeout 8m go test -run '^$' -bench='^Benchmark' -benchmem -benchtime=1s ./...
+          else
+            echo 'No benchmarks currently exist; stage intentionally skipped.'
+          fi
+
+  profiling:
+    name: Profiling
+    needs: benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go mod download
+      - name: Capture profiles when benchmarks exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -Rqs --include='*_test.go' --exclude-dir=vendor 'func Benchmark' .; then
+            mkdir -p profiling
+            timeout 8m go test -run '^$' -bench='^Benchmark' -benchtime=1s -cpuprofile=profiling/cpu.pprof -memprofile=profiling/mem.pprof ./...
+            test -s profiling/cpu.pprof
+            test -s profiling/mem.pprof
+          else
+            echo 'No benchmarks currently exist; profiling is not applicable.'
+          fi
+      - name: Upload profiles when generated
+        if: hashFiles('profiling/*.pprof') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: hed-profiles-${{ github.run_number }}
+          path: profiling/*.pprof
+          if-no-files-found: error
+
+  fabric:
+    name: Fabric readiness
+    needs: foundation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report Fabric integration status
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=0
+          for p in test-network fabric scripts/fabric; do
+            if [ -d "$p" ]; then
+              echo "Fabric harness directory found: $p"
+              found=1
+            fi
+          done
+          if grep -Rqs --exclude-dir=.git --exclude-dir=vendor 'hyperledger/fabric' .; then
+            echo 'Hyperledger Fabric dependency/reference detected.'
+            found=1
+          fi
+          if [ "$found" -eq 0 ]; then
+            echo 'No Fabric harness exists yet.'
+            echo 'PASS: readiness check only; this does not claim Fabric E2E execution.'
+          else
+            echo 'Fabric integration appears present; dedicated execution can be enabled once its harness is identified.'
+          fi
