@@ -32,6 +32,7 @@ type HLFCommitter struct {
 	stopOnce  sync.Once
 	stopped   atomic.Bool
 	commitFn  BatchCommitFunc
+	commitMu  sync.RWMutex
 }
 
 func NewHLFCommitter(cfg BatchConfig) *HLFCommitter {
@@ -171,7 +172,7 @@ func (c *HLFCommitter) flushBatch(batch []*engine.TxPayload) {
 
 // SetCommitFunc installs the real Fabric Gateway commit boundary. A nil
 // callback keeps the committer useful for deterministic load tests.
-func (c *HLFCommitter) SetCommitFunc(fn BatchCommitFunc) { c.commitFn = fn }
+func (c *HLFCommitter) SetCommitFunc(fn BatchCommitFunc) { c.commitMu.Lock(); c.commitFn = fn; c.commitMu.Unlock() }
 
 func (c *HLFCommitter) TotalCommitted() uint64 {
 	return atomic.LoadUint64(&c.committed)
