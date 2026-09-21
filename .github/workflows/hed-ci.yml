@@ -92,7 +92,7 @@ jobs:
 
   fabric-e2e:
     name: Fabric E2E
-    if: github.event_name == 'workflow_dispatch' && inputs.run_fabric_e2e
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.run_fabric_e2e)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -100,9 +100,34 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Start local Fabric test network
+        working-directory: /tmp
+        run: |
+          git clone --depth 1 --branch v2.5.12 https://github.com/hyperledger/fabric-samples.git
+          cd fabric-samples/test-network
+          ./network.sh down
+          ./network.sh up createChannel -ca -c mychannel
+          ./network.sh deployCC -ccn hed -ccp "$GITHUB_WORKSPACE/chaincode" -ccl go
+      - name: Export Fabric Gateway configuration
+        working-directory: /tmp/fabric-samples/test-network
+        run: |
+          echo "FABRIC_MSP_ID=Org1MSP" >> "$GITHUB_ENV"
+          echo "FABRIC_CERT_PATH=$PWD/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/signcerts" >> "$GITHUB_ENV"
+          echo "FABRIC_KEY_PATH=$PWD/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/keystore" >> "$GITHUB_ENV"
+          echo "FABRIC_TLS_CERT_PATH=$PWD/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt" >> "$GITHUB_ENV"
+          echo "FABRIC_PEER_ENDPOINT=dns:///127.0.0.1:7051" >> "$GITHUB_ENV"
+          echo "FABRIC_GATEWAY_PEER=peer0.org1.example.com" >> "$GITHUB_ENV"
+          echo "FABRIC_CHANNEL=mychannel" >> "$GITHUB_ENV"
+          echo "FABRIC_CHAINCODE=hed" >> "$GITHUB_ENV"
+          echo "FABRIC_FUNCTION=Commit" >> "$GITHUB_ENV"
       - name: Validate Fabric configuration
         run: go test ./integration/fabric-gateway -run 'Test(ConfigValidation|DefaultLocalConfig|ReadPEM|UninitializedBackendCommitFailsWithoutNetwork|ContextCancellationDoesNotSubmit)$' -count=1
       - name: Run live Fabric tests
         run: go test ./integration/fabric-gateway -count=1 -timeout=10m
         env:
           HED_FABRIC_E2E: "1"
+          HED_FABRIC_FAILURE: "1"
+      - name: Stop Fabric test network
+        if: always()
+        working-directory: /tmp/fabric-samples/test-network
+        run: ./network.sh down || true
