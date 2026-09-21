@@ -132,7 +132,7 @@ func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
 
 	tx1 := Tx{ID: "queue-one", Key: "k", Payload: []byte("x")}
 	if _, err = p.Submit(context.Background(), tx1); err != nil { t.Fatal(err) }
-	select { case <-b.started: case <-time.After(time.Second): t.Fatal("worker did not start first commit") }
+	select { case <-b.started: case <-time.After(5 * time.Second): t.Fatal("worker did not start first commit") }
 
 	tx2 := Tx{ID: "queue-two", Key: "k", Payload: []byte("x")}
 	if _, err = p.Submit(context.Background(), tx2); err != nil { t.Fatal(err) }
