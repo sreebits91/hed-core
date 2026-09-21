@@ -173,6 +173,7 @@ func TestReconcilerClassifiesLedgerState(t *testing.T) {
 type blockingBackend struct {
 	started chan struct{}
 	release chan struct{}
+	committed chan struct{}
 	once sync.Once
 }
 
@@ -180,6 +181,7 @@ func (b *blockingBackend) Commit(ctx context.Context, tx Tx) error {
 	b.once.Do(func() { close(b.started) })
 	select {
 	case <-b.release:
+		b.committed <- struct{}{}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -194,7 +196,7 @@ func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
 	cfg.WALPath = path
 	cfg.BatchSize = 1
 	cfg.FlushInterval = time.Hour
-	b := &blockingBackend{started: make(chan struct{}), release: make(chan struct{})}
+	b := &blockingBackend{started: make(chan struct{}), release: make(chan struct{}), committed: make(chan struct{}, 2)}
 	p, err := NewPipeline(cfg, b)
 	if err != nil { t.Fatal(err) }
 
@@ -214,12 +216,14 @@ func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
 	}
 
 	close(b.release)
-	deadline := time.Now().Add(time.Second)
-	for p.parts[0].q.Len() != 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("queued transaction was not drained")
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-b.committed:
+		case <-deadline.C:
+			t.Fatal("queued transaction did not commit")
 		}
-		time.Sleep(time.Millisecond)
 	}
 
 	if _, err = p.Submit(context.Background(), tx3); err != nil {
