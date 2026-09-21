@@ -3,7 +3,7 @@ name: HED Performance Qualification
 on:
   workflow_dispatch:
   push:
-    branches: [feature/hed-v2-stability]
+    branches: [main, "fix/**", "perf/**"]
 
 permissions:
   contents: read
