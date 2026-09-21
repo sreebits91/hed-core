@@ -22,7 +22,8 @@ type RecoveryReport struct { Replayed int; AlreadyPresent int; Committed int; Pe
 func (w *WAL) ReplayIDs() (map[string]struct{}, error) {
 	ids:=map[string]struct{}{}; if w==nil{return ids,nil}; w.mu.Lock();defer w.mu.Unlock()
 	if _,err:=w.f.Seek(0,0);err!=nil{return nil,err}; r:=bufio.NewReader(w.f)
-	for { line,err:=r.ReadBytes('\n'); if err!=nil&&len(line)==0 {if err==io.EOF{break};return nil,err}; if len(line)==0 {if err!=nil{break};continue}; var rec WALRecord; if json.Unmarshal(line,&rec)!=nil||rec.Checksum!=recordChecksum(rec.Kind,rec.Tx,rec.ID){return nil,ErrWALCorrupt}; if rec.Kind=="prepare"{ids[rec.Tx.ID]=struct{}{}}; if err!=nil{break} }
+	for { line,err:=r.ReadBytes('
+'); if err!=nil&&len(line)==0 {if err==io.EOF{break};return nil,err}; if len(line)==0 {if err!=nil{break};continue}; var rec WALRecord; if json.Unmarshal(line,&rec)!=nil||rec.Checksum!=recordChecksum(rec.Kind,rec.Tx,rec.ID){return nil,ErrWALCorrupt}; if rec.Kind=="prepare"{ids[rec.Tx.ID]=struct{}{}}; if err!=nil{break} }
 	return ids,nil
 }
 
