@@ -1,0 +1,102 @@
+name: HED Core CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_performance:
+        description: "Run performance qualification"
+        required: false
+        default: false
+        type: boolean
+      run_fabric_e2e:
+        description: "Run live Fabric E2E"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Go quality gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check formatting
+        run: |
+          files="$(gofmt -l .)"
+          test -z "$files" || { echo "gofmt required:"; echo "$files"; exit 1; }
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: Race test
+        run: go test -race ./...
+      - name: Vulnerability scan
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: "1.26.x"
+          go-package: ./...
+
+  performance:
+    name: Performance qualification
+    if: github.event_name == 'workflow_dispatch' && inputs.run_performance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: 100K / 250K / 500K qualification
+        run: HED_PERF_LEVELS=0 go test ./pkg/hlf -run TestHLFLoadLevels -count=1 -timeout=2m
+      - name: Extended performance ladder
+        run: HED_PERF_LEVELS=1 go test ./pkg/hlf -run TestHLFLoadLevels -count=1 -timeout=5m
+
+  profiling:
+    name: CPU allocation mutex block profiling
+    if: github.event_name == 'workflow_dispatch' && inputs.run_performance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: CPU profile
+        run: go test ./pkg/v2 -run '^$' -bench BenchmarkPipelineIngress -benchtime=5s -cpuprofile cpu.out -memprofile alloc.out -mutexprofile mutex.out -blockprofile block.out
+      - name: Upload profiles
+        uses: actions/upload-artifact@v4
+        with:
+          name: hed-profiles
+          path: |
+            cpu.out
+            alloc.out
+            mutex.out
+            block.out
+
+  fabric-e2e:
+    name: Fabric E2E
+    if: github.event_name == 'workflow_dispatch' && inputs.run_fabric_e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate Fabric configuration
+        run: go test ./integration/fabric-gateway -run 'Test(ConfigValidation|DefaultLocalConfig|ReadPEM|UninitializedBackendCommitFailsWithoutNetwork|ContextCancellationDoesNotSubmit)$' -count=1
+      - name: Run live Fabric tests
+        run: go test ./integration/fabric-gateway -count=1 -timeout=10m
+        env:
+          HED_FABRIC_E2E: "1"
