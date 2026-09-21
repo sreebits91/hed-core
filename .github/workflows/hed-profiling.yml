@@ -2,7 +2,7 @@ name: HED Profiling
 
 on:
   push:
-    branches: ["fix/hed-core-stability-phase"]
+    branches: [main, "fix/**", "perf/**"]
   workflow_dispatch:
     inputs:
       profile_level:
