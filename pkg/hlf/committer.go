@@ -161,8 +161,11 @@ func (c *HLFCommitter) partitionFor(tx *engine.TxPayload) int {
 
 func (c *HLFCommitter) flushBatch(batch []*engine.TxPayload) {
 	if len(batch) == 0 { return }
-	if c.commitFn != nil {
-		if err := c.commitFn(c.ctx, batch); err != nil {
+	c.commitMu.RLock()
+	fn := c.commitFn
+	c.commitMu.RUnlock()
+	if fn != nil {
+		if err := fn(c.ctx, batch); err != nil {
 			atomic.AddUint64(&c.failed, uint64(len(batch)))
 			return
 		}
