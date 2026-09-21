@@ -1,6 +1,6 @@
 package v2
 
-import("context";"errors";"os";"path/filepath";"sync";"sync/atomic";"testing";"time")
+import("context";"errors";"os";"path/filepath";"strconv";"sync";"sync/atomic";"testing";"time")
 type testBackend struct{mu sync.Mutex;ids []string;fail int;calls int32}
 func(b *testBackend)Commit(ctx context.Context,tx Tx)error{b.mu.Lock();defer b.mu.Unlock();atomic.AddInt32(&b.calls,1);if b.fail>0{b.fail--;return errors.New("transient")};b.ids=append(b.ids,tx.ID);return nil}
 func testConfig(t *testing.T)Config{c:=DefaultConfig();c.Partitions=4;c.QueueCapacity=4096;c.BatchSize=16;c.FlushInterval=time.Millisecond;c.DedupCapacity=10000;c.DedupTTL=time.Second;c.CommitTimeout=500*time.Millisecond;c.Retry.MaxAttempts=3;c.Retry.InitialBackoff=time.Millisecond;c.Retry.MaxBackoff=4*time.Millisecond;return c}
