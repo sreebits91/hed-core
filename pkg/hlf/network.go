@@ -79,6 +79,7 @@ func (n *Network) GetRecentLedgerTransactions() []TxRecord {
 	if len(n.txHistory) > 50 { start = len(n.txHistory)-50 }
 	out := make([]TxRecord, len(n.txHistory)-start)
 	copy(out, n.txHistory[start:])
+	for i := range out { out[i].Payload = append([]byte(nil), out[i].Payload...) }
 	return out
 }
 
