@@ -31,9 +31,11 @@ func (w *WAL) ReplayIDs() (map[string]struct{}, error) {
 // without a corresponding commit marker. Replay order is partition/sequence.
 func(p *Pipeline) Recover(ctx context.Context)(RecoveryReport,error){
 	start:=time.Now();var report RecoveryReport;if ctx==nil{ctx=context.Background()};if p==nil||p.wal==nil{return report,nil}
-	ids,err:=p.wal.ReplayIDs();if err!=nil{return report,err};now:=time.Now();for id:=range ids{p.dedup.SeenOrAdd(id,now)}
+	ids,err:=p.wal.ReplayIDs();if err!=nil{return report,err}
 	txs,err:=p.wal.Replay();if err!=nil{return report,err};sort.Slice(txs,func(i,j int)bool{if txs[i].Partition==txs[j].Partition{return txs[i].Sequence<txs[j].Sequence};return txs[i].Partition<txs[j].Partition})
-	for _,tx:=range txs{if err:=ctx.Err();err!=nil{return report,err};idx:=tx.Partition;if idx<0||idx>=len(p.parts){report.Unknown++;continue};if tx.Sequence>p.parts[idx].seq.Load(){p.parts[idx].seq.Store(tx.Sequence)};if err:=p.parts[idx].q.Push(tx);err!=nil{report.Pending++;continue};report.Replayed++;atomic.AddUint64(&p.metrics.partitions[idx].accepted,1);atomic.StoreUint64(&p.metrics.partitions[idx].queueDepth,uint64(p.parts[idx].q.Len()))}
+	pendingIDs:=make(map[string]struct{},len(txs));for _,tx:=range txs{pendingIDs[tx.ID]=struct{}{}}
+	now:=time.Now();for id:=range ids{if _,pending:=pendingIDs[id];!pending{p.dedup.SeenOrAdd(id,now)}}
+	for _,tx:=range txs{if err:=ctx.Err();err!=nil{return report,err};if p.dedup.SeenOrAdd(tx.ID,now){report.AlreadyPresent++;continue};idx:=tx.Partition;if idx<0||idx>=len(p.parts){p.dedup.Forget(tx.ID);report.Unknown++;continue};if tx.Sequence>p.parts[idx].seq.Load(){p.parts[idx].seq.Store(tx.Sequence)};if err:=p.parts[idx].q.Push(tx);err!=nil{p.dedup.Forget(tx.ID);report.Pending++;continue};report.Replayed++;atomic.AddUint64(&p.metrics.partitions[idx].accepted,1);atomic.StoreUint64(&p.metrics.partitions[idx].queueDepth,uint64(p.parts[idx].q.Len()))}
 	report.Duration=time.Since(start);p.metrics.recovered.Add(uint64(report.Replayed));return report,nil
 }
 
