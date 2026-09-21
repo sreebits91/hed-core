@@ -87,4 +87,4 @@ func(p *Pipeline)Submit(ctx context.Context,tx Tx)(int,error){if e:=ctx.Err();e!
 func(p *Pipeline)Backpressure(idx int)BackpressureLevel{if idx<0||idx>=len(p.parts){return Rejecting};return Level(p.parts[idx].q.Len(),p.parts[idx].q.Cap())}
 func(p *Pipeline)Metrics()*Metrics{return p.metrics}
 func(p *Pipeline)ReplayUncommitted()([]Tx,error){if p.wal==nil{return nil,nil};txs,e:=p.wal.Replay();if e!=nil{return nil,e};p.metrics.recovered.Add(uint64(len(txs)));return txs,nil}
-func(p *Pipeline)Stop(){p.stopOnce.Do(func(){p.submitMu.Lock();p.accepting=false;for i:=range p.parts{p.parts[i].q.Close()};p.submitMu.Unlock();p.wg.Wait();p.cancel();if p.wal!=nil{_=p.wal.Close()}})}
+func(p *Pipeline)Stop(){p.stopOnce.Do(func(){p.submitMu.Lock();p.accepting=false;for i:=range p.parts{p.parts[i].q.Close()};p.submitMu.Unlock();p.cancel();p.wg.Wait();if p.wal!=nil{_=p.wal.Close()}})}
