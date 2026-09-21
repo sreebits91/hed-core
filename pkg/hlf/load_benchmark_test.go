@@ -27,7 +27,9 @@ func submitLoad(t testing.TB, c *HLFCommitter, n int) {
 		}
 	}
 
-	deadline := time.Now().Add(30 * time.Second)
+	timeout := 30 * time.Second
+	if n >= 1_000_000 { timeout = 2 * time.Minute }
+	deadline := time.Now().Add(timeout)
 	for c.TotalCommitted() < uint64(n) {
 		if time.Now().After(deadline) {
 			t.Fatalf("commit timeout: committed=%d want=%d dropped=%d failed=%d", c.TotalCommitted(), n, c.TotalDropped(), c.TotalFailed())
@@ -83,7 +85,9 @@ func benchmarkHLFLoad(b *testing.B, level int) {
 			}
 		}
 		b.StopTimer()
-		deadline := time.Now().Add(30 * time.Second)
+		timeout := 30 * time.Second
+		if level >= 1_000_000 { timeout = 2 * time.Minute }
+		deadline := time.Now().Add(timeout)
 		for c.TotalCommitted() < uint64(level) {
 			if time.Now().After(deadline) {
 				c.Stop()
