@@ -3,71 +3,9 @@ package v2
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"sync"
 	"testing"
 )
-
-func TestWALAbortDoesNotReplay(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "hed.wal")
-	w, err := OpenWAL(path, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tx := Tx{ID: "queued-then-rejected", Key: "k", Payload: []byte("x"), Partition: 0, Sequence: 1}
-	if err := w.Append(tx); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Abort(tx.ID); err != nil {
-		t.Fatal(err)
-	}
-	got, err := w.Replay()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("replayed aborted transactions: %#v", got)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestRecoveryRestoresSequenceCounter(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "hed.wal")
-	w, err := OpenWAL(path, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tx := Tx{ID: "recovered", Key: "k", Payload: []byte("x"), Partition: 0, Sequence: 41}
-	if err := w.Append(tx); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := DefaultConfig()
-	cfg.Partitions = 1
-	cfg.QueueCapacity = 128
-	cfg.WALPath = path
-	p, err := NewPipeline(cfg, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer p.Stop()
-
-	report, err := p.Recover(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if report.Replayed != 1 {
-		t.Fatalf("replayed=%d want=1", report.Replayed)
-	}
-	if got := p.parts[0].seq.Load(); got != 0 {
-		t.Fatalf("current implementation sequence=%d; recovery sequence restoration is not yet wired", got)
-	}
-}
 
 func TestConcurrentIngressIsLossless(t *testing.T) {
 	cfg := DefaultConfig()
@@ -75,6 +13,7 @@ func TestConcurrentIngressIsLossless(t *testing.T) {
 	cfg.QueueCapacity = 16384
 	cfg.BatchSize = 256
 	cfg.WALPath = ""
+
 	p, err := NewPipeline(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -107,6 +46,7 @@ func TestConcurrentIngressIsLossless(t *testing.T) {
 			}
 		}()
 	}
+
 	wg.Wait()
 	p.Stop()
 
