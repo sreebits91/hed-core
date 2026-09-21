@@ -68,7 +68,7 @@ type PermanentError struct{Err error}
 func(e PermanentError)Error()string{return e.Err.Error()};func(e PermanentError)Unwrap()error{return e.Err}
 type Committer struct{backend CommitBackend;policy RetryPolicy;timeout time.Duration;retries atomic.Uint64}
 func NewCommitter(b CommitBackend,p RetryPolicy,t time.Duration)*Committer{return &Committer{backend:b,policy:p,timeout:t}}
-func(c *Committer)Commit(ctx context.Context,tx Tx)error{if c.backend==nil{return nil};var err error;back:=c.policy.InitialBackoff;for a:=1;a<=c.policy.MaxAttempts;a++{cc,cancel:=context.WithTimeout(ctx,c.timeout);err=c.backend.Commit(cc,tx);cancel();if err==nil{return nil};var pe PermanentError;if errors.As(err,&pe){return err};if a==c.policy.MaxAttempts{break};c.retries.Add(1);tm:=time.NewTimer(back);select{case<-ctx.Done():tm.Stop();return ctx.Err();case<-tm.C:};back*=2;if back>c.policy.MaxBackoff{back=c.policy.MaxBackoff}};return err}
+func(c *Committer)Commit(ctx context.Context,tx Tx)error{if c.backend==nil{return nil};var err error;back:=c.policy.InitialBackoff;for a:=1;a<=c.policy.MaxAttempts;a++{cc:=ctx;var cancel context.CancelFunc;if c.timeout>0{cc,cancel=context.WithTimeout(ctx,c.timeout)};err=c.backend.Commit(cc,tx);if cancel!=nil{cancel()};if err==nil{return nil};var pe PermanentError;if errors.As(err,&pe){return err};if a==c.policy.MaxAttempts{break};c.retries.Add(1);tm:=time.NewTimer(back);select{case<-ctx.Done():tm.Stop();return ctx.Err();case<-tm.C:};back*=2;if back>c.policy.MaxBackoff{back=c.policy.MaxBackoff}};return err}
 func(c *Committer)RetryCount()uint64{return c.retries.Load()}
 
 type PartitionMetrics struct{accepted,committed,failed,retries,rejected,queueDepth,batchSize,commitLatencyNs,orderingErrors uint64}
