@@ -56,22 +56,30 @@ func NewNetwork() *Network {
 func (n *Network) GetPeers() []PeerInfo {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	return n.peers
+	out := make([]PeerInfo, len(n.peers))
+	copy(out, n.peers)
+	return out
 }
 
 func (n *Network) GetChannels() []ChannelInfo {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	return n.channels
+	out := make([]ChannelInfo, len(n.channels))
+	for i := range n.channels {
+		out[i] = n.channels[i]
+		out[i].JoinedPeers = append([]string(nil), n.channels[i].JoinedPeers...)
+	}
+	return out
 }
 
 func (n *Network) GetRecentLedgerTransactions() []TxRecord {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	if len(n.txHistory) > 50 {
-		return n.txHistory[len(n.txHistory)-50:]
-	}
-	return n.txHistory
+	start := 0
+	if len(n.txHistory) > 50 { start = len(n.txHistory)-50 }
+	out := make([]TxRecord, len(n.txHistory)-start)
+	copy(out, n.txHistory[start:])
+	return out
 }
 
 func (n *Network) GetTPSMetrics() (currentTPS float64, peakTPS float64, totalTx int64) {
