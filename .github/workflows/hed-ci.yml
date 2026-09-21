@@ -103,7 +103,7 @@ jobs:
       - name: Start local Fabric test network
         working-directory: /tmp
         run: |
-          git clone --depth 1 --branch v2.5.12 https://github.com/hyperledger/fabric-samples.git
+          git clone --depth 1 --branch release-2.5 https://github.com/hyperledger/fabric-samples.git
           cd fabric-samples/test-network
           ./network.sh down
           ./network.sh up createChannel -ca -c mychannel
