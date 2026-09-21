@@ -16,6 +16,7 @@ on:
           - "500K"
           - "1M"
           - "2M"
+          - "2.7M"
           - "5M"
 
 permissions:
@@ -68,7 +69,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p profiling
-          BENCH="BenchmarkHLFLoad${PROFILE_LEVEL}"
+          case "${PROFILE_LEVEL}" in
+            2.7M) BENCH="BenchmarkHLFLoad2_7M" ;;
+            *) BENCH="BenchmarkHLFLoad${PROFILE_LEVEL}" ;;
+          esac
           echo "Requested benchmark: ${BENCH}"
           go test -list '^BenchmarkHLFLoad' ./pkg/hlf | tee profiling/benchmarks.txt
           grep -Fx "${BENCH}" profiling/benchmarks.txt
@@ -77,7 +81,10 @@ jobs:
         run: |
           set -euo pipefail
           PROFILE_DIR="$GITHUB_WORKSPACE/profiling"
-          BENCH="BenchmarkHLFLoad${PROFILE_LEVEL}"
+          case "${PROFILE_LEVEL}" in
+            2.7M) BENCH="BenchmarkHLFLoad2_7M" ;;
+            *) BENCH="BenchmarkHLFLoad${PROFILE_LEVEL}" ;;
+          esac
           mkdir -p "$PROFILE_DIR"
 
           echo "Running one deterministic ${BENCH} load"
