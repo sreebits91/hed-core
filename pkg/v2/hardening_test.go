@@ -144,6 +144,7 @@ func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
 	waitForCommit(t, b.committed, tx2.ID)
 
 	if _, err = p.Submit(context.Background(), tx3); err != nil { t.Fatalf("retry failed after queue drained: %v", err) }
+	waitForCommit(t, b.committed, tx3.ID)
 	p.Stop()
 
 	w, err := OpenWAL(path, false); if err != nil { t.Fatal(err) }; defer w.Close()
