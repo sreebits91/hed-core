@@ -47,8 +47,8 @@ func TestHLFCommitterCommitBoundaryFailure(t *testing.T) {
 		return errors.New("fabric unavailable")
 	})
 	for i := 0; i < 10; i++ {
-		if !c.SubmitTx(&engine.TxPayload{TxUUID: engine.GenerateUUID(), AccountID: "acc", Amount: int64(i)}) == false {
-			// no-op; the queue accepts the test load
+		if !c.SubmitTx(&engine.TxPayload{TxUUID: engine.GenerateUUID(), AccountID: "acc", Amount: int64(i)}) {
+			t.Fatal("transaction unexpectedly rejected")
 		}
 	}
 	deadline := time.Now().Add(time.Second)
