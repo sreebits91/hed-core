@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -69,8 +70,12 @@ func TestRecoveryRestoresSequenceCounter(t *testing.T) {
 		t.Fatalf("sequence=%d want=41", got)
 	}
 	second, err := p.Recover(context.Background())
-	if err != nil { t.Fatal(err) }
-	if second.Replayed != 0 || second.AlreadyPresent != 1 { t.Fatalf("second recovery=%+v; recovery must be idempotent", second) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Replayed != 0 || second.AlreadyPresent != 1 {
+		t.Fatalf("second recovery=%+v; recovery must be idempotent", second)
+	}
 }
 
 func TestConcurrentIngressIsLossless(t *testing.T) {
@@ -123,7 +128,9 @@ func TestConcurrentIngressIsLossless(t *testing.T) {
 
 func TestDedupForgetRemainsBounded(t *testing.T) {
 	d, err := NewDedup(32, time.Hour)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now()
 	for i := 0; i < 10000; i++ {
 		id := strconv.Itoa(i)
@@ -136,16 +143,24 @@ func TestDedupForgetRemainsBounded(t *testing.T) {
 }
 
 func TestBackpressureLevels(t *testing.T) {
-	if Level(0, 100) != Normal { t.Fatal("0 should be NORMAL") }
-	if Level(50, 100) != Busy { t.Fatal("50% should be BUSY") }
-	if Level(80, 100) != Saturated { t.Fatal("80% should be SATURATED") }
-	if Level(100, 100) != Rejecting { t.Fatal("full should be REJECTING") }
+	if Level(0, 100) != Normal {
+		t.Fatal("0 should be NORMAL")
+	}
+	if Level(50, 100) != Busy {
+		t.Fatal("50% should be BUSY")
+	}
+	if Level(80, 100) != Saturated {
+		t.Fatal("80% should be SATURATED")
+	}
+	if Level(100, 100) != Rejecting {
+		t.Fatal("full should be REJECTING")
+	}
 }
 
 type fakeLedger struct {
 	status LedgerTxStatus
-	err error
-	calls int
+	err    error
+	calls  int
 }
 
 func (f *fakeLedger) Status(context.Context, string) (LedgerTxStatus, error) {
@@ -157,12 +172,18 @@ func TestReconcilerClassifiesLedgerState(t *testing.T) {
 	f := &fakeLedger{status: LedgerCommitted}
 	r := NewReconciler(f)
 	status, err := r.Reconcile(context.Background(), "tx-1")
-	if err != nil || status != LedgerCommitted { t.Fatalf("status=%s err=%v", status, err) }
-	if f.calls != 1 { t.Fatalf("calls=%d want=1", f.calls) }
+	if err != nil || status != LedgerCommitted {
+		t.Fatalf("status=%s err=%v", status, err)
+	}
+	if f.calls != 1 {
+		t.Fatalf("calls=%d want=1", f.calls)
+	}
 
 	f.status = LedgerNotCommitted
 	status, err = r.Reconcile(context.Background(), "tx-2")
-	if err != nil || status != LedgerNotCommitted { t.Fatalf("status=%s err=%v", status, err) }
+	if err != nil || status != LedgerNotCommitted {
+		t.Fatalf("status=%s err=%v", status, err)
+	}
 
 	f.status = LedgerUnknown
 	if _, err = r.Reconcile(context.Background(), "tx-3"); err != ErrLedgerStateUnknown {
@@ -171,10 +192,10 @@ func TestReconcilerClassifiesLedgerState(t *testing.T) {
 }
 
 type blockingBackend struct {
-	started chan struct{}
-	release chan struct{}
+	started   chan struct{}
+	release   chan struct{}
 	committed chan struct{}
-	once sync.Once
+	once      sync.Once
 }
 
 func (b *blockingBackend) Commit(ctx context.Context, tx Tx) error {
@@ -198,10 +219,14 @@ func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
 	cfg.FlushInterval = time.Hour
 	b := &blockingBackend{started: make(chan struct{}), release: make(chan struct{}), committed: make(chan struct{}, 2)}
 	p, err := NewPipeline(cfg, b)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	tx1 := Tx{ID: "queue-one", Key: "k", Payload: []byte("x")}
-	if _, err = p.Submit(context.Background(), tx1); err != nil { t.Fatal(err) }
+	if _, err = p.Submit(context.Background(), tx1); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-b.started:
 	case <-time.After(time.Second):
@@ -209,7 +234,9 @@ func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
 	}
 
 	tx2 := Tx{ID: "queue-two", Key: "k", Payload: []byte("x")}
-	if _, err = p.Submit(context.Background(), tx2); err != nil { t.Fatal(err) }
+	if _, err = p.Submit(context.Background(), tx2); err != nil {
+		t.Fatal(err)
+	}
 	tx3 := Tx{ID: "queue-three", Key: "k", Payload: []byte("x")}
 	if _, err = p.Submit(context.Background(), tx3); err != ErrQueueFull {
 		t.Fatalf("err=%v want queue full", err)
@@ -230,10 +257,14 @@ func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
 	p.Stop()
 
 	w, err := OpenWAL(path, false)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer w.Close()
 	txs, err := w.Replay()
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tx := range txs {
 		if tx.ID == tx3.ID {
 			t.Fatalf("aborted transaction remained pending after retry: %+v", tx)
