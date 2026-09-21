@@ -108,12 +108,15 @@ func (b *blockingBackend) Commit(ctx context.Context, tx Tx) error {
 
 func waitForCommit(t *testing.T, ch <-chan string, id string) {
 	t.Helper()
-	timer := time.NewTimer(time.Second)
+	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	for {
 		select {
 		case got := <-ch:
-			if got == id { return }
+			if got == id {
+				return
+			}
+			t.Fatalf("observed unexpected backend commit %q while waiting for %s", got, id)
 		case <-timer.C:
 			t.Fatalf("timed out waiting for backend commit of %s", id)
 		}
