@@ -44,7 +44,11 @@ func TestHLFLoadLevels(t *testing.T) {
 		t.Run(loadLevelName(n), func(t *testing.T) {
 			c := newBenchmarkCommitter()
 			defer c.Stop()
+			start := time.Now()
 			submitLoad(t, c, n)
+			elapsed := time.Since(start)
+			tps := float64(n) / elapsed.Seconds()
+			t.Logf("load=%d elapsed=%s tps=%.0f", n, elapsed, tps)
 			if got := c.TotalDropped(); got != 0 {
 				t.Fatalf("dropped=%d want=0", got)
 			}
