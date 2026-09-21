@@ -12,6 +12,7 @@ permissions:
 
 env:
   GOFLAGS: -mod=mod
+  GO_VERSION: '1.26.8'
 
 jobs:
   verify:
@@ -35,9 +36,9 @@ jobs:
           rm -f .gitmodules
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.26.8'
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Verify toolchain
@@ -50,16 +51,25 @@ jobs:
           files=$(git ls-files '*.go' | grep -v '^vendor/' || true)
           if [[ -z "$files" ]]; then exit 0; fi
           bad=$(echo "$files" | xargs gofmt -l || true)
-          if [[ -n "$bad" ]]; then echo "$bad"; exit 1; fi
+          if [[ -n "$bad" ]]; then
+            echo "Unformatted Go files:"
+            echo "$bad"
+            exit 1
+          fi
 
       - name: Go vet
         run: go vet ./...
+
       - name: Unit tests
         run: go test ./...
+
       - name: Race tests
         run: go test -race ./...
+
       - name: Load-level regression
-        run: go test -run '^TestHLFLoadLevels
+        run: go test -run '^TestHLFLoadLevels$' -v ./pkg/hlf
+
+      - name: Security scan
         shell: bash
         run: |
           set -euo pipefail
@@ -73,16 +83,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.26.8'
+          go-version: ${{ env.GO_VERSION }}
           cache: true
+
       - name: 100K benchmark smoke
         run: |
           set -euo pipefail
-          GOFLAGS=-mod=mod go test -run '^ -bench '^BenchmarkHLFLoad100K -benchtime=1x -count=1 ./pkg/hlf | tee benchmark-100K.txt
+          GOFLAGS=-mod=mod go test -run '^$' -bench '^BenchmarkHLFLoad100K$' -benchtime=1x -count=1 ./pkg/hlf | tee benchmark-100K.txt
           grep -Eq 'BenchmarkHLFLoad100K(-[0-9]+)?[[:space:]]+[0-9]+' benchmark-100K.txt
+
       - name: Upload benchmark
         if: always()
         uses: actions/upload-artifact@v4
