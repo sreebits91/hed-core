@@ -97,11 +97,13 @@ func TestConcurrentIngressIsLossless(t *testing.T) {
 					Key:      "account-" + itoa(i%64),
 					Payload: []byte("payload"),
 				})
-				if err == nil {
-					mu.Lock()
-					accepted++
-					mu.Unlock()
+				if err != nil {
+					t.Errorf("unexpected submit error: %v", err)
+					return
 				}
+				mu.Lock()
+				accepted++
+				mu.Unlock()
 			}
 		}()
 	}
