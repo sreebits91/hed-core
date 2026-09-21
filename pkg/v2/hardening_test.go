@@ -83,7 +83,16 @@ func TestPipelineStopDoesNotLeakWorkerGoroutines(t *testing.T) {
 func TestDedupForgetRemainsBounded(t *testing.T) {
 	d, err := NewDedup(32, time.Hour); if err != nil { t.Fatal(err) }; now := time.Now()
 	for i := 0; i < 10000; i++ { id := strconv.Itoa(i); d.SeenOrAdd(id, now); d.Forget(id) }
-	if len(d.m) > 32 || len(d.order) > 64 { t.Fatalf("dedup grew unexpectedly: map=%d order=%d", len(d.m), len(d.order)) }
+	total := 0
+	maxOrder := 0
+	for i := range d.shards {
+		s := &d.shards[i]
+		s.mu.Lock()
+		total += len(s.m)
+		if len(s.order) > maxOrder { maxOrder = len(s.order) }
+		s.mu.Unlock()
+	}
+	if total > 32 || maxOrder > 64 { t.Fatalf("dedup grew unexpectedly: entries=%d max_order=%d", total, maxOrder) }
 }
 
 func TestBackpressureLevels(t *testing.T) {
