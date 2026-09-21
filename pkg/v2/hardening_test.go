@@ -216,14 +216,12 @@ func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
 	}
 
 	close(b.release)
-	deadline := time.NewTimer(time.Second)
-	defer deadline.Stop()
-	for i := 0; i < 2; i++ {
-		select {
-		case <-b.committed:
-		case <-deadline.C:
-			t.Fatal("queued transaction did not commit")
+	deadline := time.Now().Add(time.Second)
+	for atomic.LoadUint64(&p.metrics.partitions[0].committed) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("expected two committed transactions, got %d", atomic.LoadUint64(&p.metrics.partitions[0].committed))
 		}
+		time.Sleep(time.Millisecond)
 	}
 
 	if _, err = p.Submit(context.Background(), tx3); err != nil {
