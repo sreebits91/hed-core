@@ -121,7 +121,6 @@ func TestConcurrentIngressIsLossless(t *testing.T) {
 	}
 }
 
-
 func TestDedupForgetRemainsBounded(t *testing.T) {
 	d, err := NewDedup(32, time.Hour)
 	if err != nil { t.Fatal(err) }
@@ -143,12 +142,12 @@ func TestBackpressureLevels(t *testing.T) {
 	if Level(100, 100) != Rejecting { t.Fatal("full should be REJECTING") }
 }
 
-
 type fakeLedger struct {
 	status LedgerTxStatus
 	err error
 	calls int
 }
+
 func (f *fakeLedger) Status(context.Context, string) (LedgerTxStatus, error) {
 	f.calls++
 	return f.status, f.err
@@ -171,11 +170,20 @@ func TestReconcilerClassifiesLedgerState(t *testing.T) {
 	}
 }
 
+type blockingBackend struct {
+	started chan struct{}
+	release chan struct{}
+	once sync.Once
+}
 
-type blockingBackend struct { started chan struct{}; release chan struct{}; once sync.Once }
 func (b *blockingBackend) Commit(ctx context.Context, tx Tx) error {
 	b.once.Do(func() { close(b.started) })
-	select { case <-b.release: return nil; case <-ctx.Done(): return ctx.Err() }
+	select {
+	case <-b.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
@@ -192,19 +200,30 @@ func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
 
 	tx1 := Tx{ID: "queue-one", Key: "k", Payload: []byte("x")}
 	if _, err = p.Submit(context.Background(), tx1); err != nil { t.Fatal(err) }
-	select { case <-b.started: case <-time.After(time.Second): t.Fatal("worker did not start first commit") }
+	select {
+	case <-b.started:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not start first commit")
+	}
 
 	tx2 := Tx{ID: "queue-two", Key: "k", Payload: []byte("x")}
 	if _, err = p.Submit(context.Background(), tx2); err != nil { t.Fatal(err) }
 	tx3 := Tx{ID: "queue-three", Key: "k", Payload: []byte("x")}
-	if _, err = p.Submit(context.Background(), tx3); err != ErrQueueFull { t.Fatalf("err=%v want queue full", err) }
+	if _, err = p.Submit(context.Background(), tx3); err != ErrQueueFull {
+		t.Fatalf("err=%v want queue full", err)
+	}
 
 	close(b.release)
 	deadline := time.Now().Add(time.Second)
-	for {
-		if _, err = p.Submit(context.Background(), tx3); err == nil { break }
-		if time.Now().After(deadline) { t.Fatalf("retry failed: %v", err) }
+	for p.parts[0].q.Len() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("queued transaction was not drained")
+		}
 		time.Sleep(time.Millisecond)
+	}
+
+	if _, err = p.Submit(context.Background(), tx3); err != nil {
+		t.Fatalf("retry failed after queue drained: %v", err)
 	}
 	p.Stop()
 
@@ -213,5 +232,9 @@ func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
 	defer w.Close()
 	txs, err := w.Replay()
 	if err != nil { t.Fatal(err) }
-	for _, tx := range txs { if tx.ID == tx3.ID { t.Fatalf("aborted transaction remained pending after retry: %+v", tx) } }
+	for _, tx := range txs {
+		if tx.ID == tx3.ID {
+			t.Fatalf("aborted transaction remained pending after retry: %+v", tx)
+		}
+	}
 }
