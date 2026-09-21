@@ -3,6 +3,7 @@ package v2
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -56,6 +57,27 @@ func TestConcurrentIngressIsLossless(t *testing.T) {
 	}
 	wg.Wait(); p.Stop()
 	if accepted != producers*perProducer { t.Fatalf("accepted=%d want=%d", accepted, producers*perProducer) }
+}
+
+
+func TestPipelineStopDoesNotLeakWorkerGoroutines(t *testing.T) {
+	before := runtime.NumGoroutine()
+	cfg := DefaultConfig()
+	cfg.Partitions = 32
+	cfg.QueueCapacity = 128
+	p, err := NewPipeline(cfg, nil)
+	if err != nil { t.Fatal(err) }
+	p.Stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= before+2 {
+			return
+		}
+		runtime.Gosched()
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("worker goroutines did not drain: before=%d after=%d", before, runtime.NumGoroutine())
 }
 
 func TestDedupForgetRemainsBounded(t *testing.T) {
