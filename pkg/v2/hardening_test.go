@@ -172,6 +172,12 @@ func TestReconcilerClassifiesLedgerState(t *testing.T) {
 }
 
 
+type blockingBackend struct { started chan struct{}; release chan struct{}; once sync.Once }
+func (b *blockingBackend) Commit(ctx context.Context, tx Tx) error {
+	b.once.Do(func() { close(b.started) })
+	select { case <-b.release: return nil; case <-ctx.Done(): return ctx.Err() }
+}
+
 func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hed.wal")
 	cfg := DefaultConfig()
@@ -180,13 +186,26 @@ func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
 	cfg.WALPath = path
 	cfg.BatchSize = 1
 	cfg.FlushInterval = time.Hour
-	p, err := NewPipeline(cfg, nil)
+	b := &blockingBackend{started: make(chan struct{}), release: make(chan struct{})}
+	p, err := NewPipeline(cfg, b)
 	if err != nil { t.Fatal(err) }
 
 	tx1 := Tx{ID: "queue-one", Key: "k", Payload: []byte("x")}
 	if _, err = p.Submit(context.Background(), tx1); err != nil { t.Fatal(err) }
+	select { case <-b.started: case <-time.After(time.Second): t.Fatal("worker did not start first commit") }
+
 	tx2 := Tx{ID: "queue-two", Key: "k", Payload: []byte("x")}
-	if _, err = p.Submit(context.Background(), tx2); err != ErrQueueFull { t.Fatalf("err=%v want queue full", err) }
+	if _, err = p.Submit(context.Background(), tx2); err != nil { t.Fatal(err) }
+	tx3 := Tx{ID: "queue-three", Key: "k", Payload: []byte("x")}
+	if _, err = p.Submit(context.Background(), tx3); err != ErrQueueFull { t.Fatalf("err=%v want queue full", err) }
+
+	close(b.release)
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err = p.Submit(context.Background(), tx3); err == nil { break }
+		if time.Now().After(deadline) { t.Fatalf("retry failed: %v", err) }
+		time.Sleep(time.Millisecond)
+	}
 	p.Stop()
 
 	w, err := OpenWAL(path, false)
@@ -194,5 +213,5 @@ func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
 	defer w.Close()
 	txs, err := w.Replay()
 	if err != nil { t.Fatal(err) }
-	if len(txs) != 1 || txs[0].ID != tx1.ID { t.Fatalf("WAL pending=%+v", txs) }
+	for _, tx := range txs { if tx.ID == tx3.ID { t.Fatalf("aborted transaction remained pending after retry: %+v", tx) } }
 }
