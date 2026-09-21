@@ -70,6 +70,15 @@ func (p *Pipeline) recoverTransactions(ctx context.Context, ledger LedgerState) 
 
 	pendingIDs := make(map[string]struct{}, len(txs))
 	for _, tx := range txs { pendingIDs[tx.ID] = struct{}{} }
+	// A recovery replay can be consumed and committed immediately by a running
+	// worker. Keep a bounded in-process record so a second Recover call remains
+	// idempotent even when the WAL commit marker is written between calls.
+	p.recoveryMu.Lock()
+	for id := range ids {
+		if _, pending := pendingIDs[id]; pending { continue }
+		if _, recovered := p.recovered[id]; recovered { report.AlreadyPresent++ }
+	}
+	p.recoveryMu.Unlock()
 	now := time.Now()
 	for id := range ids {
 		if _, pending := pendingIDs[id]; !pending { p.dedup.SeenOrAdd(id, now) }
@@ -112,6 +121,12 @@ func (p *Pipeline) recoverTransactions(ctx context.Context, ledger LedgerState) 
 			continue
 		}
 		report.Replayed++
+		p.recoveryMu.Lock()
+		if len(p.recovered) >= p.cfg.DedupCapacity {
+			for old := range p.recovered { delete(p.recovered, old); break }
+		}
+		p.recovered[tx.ID] = struct{}{}
+		p.recoveryMu.Unlock()
 		atomic.AddUint64(&p.metrics.partitions[idx].accepted, 1)
 		atomic.StoreUint64(&p.metrics.partitions[idx].queueDepth, uint64(p.parts[idx].q.Len()))
 	}
