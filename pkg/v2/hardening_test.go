@@ -139,3 +139,31 @@ func TestBackpressureLevels(t *testing.T) {
 	if Level(80, 100) != Saturated { t.Fatal("80% should be SATURATED") }
 	if Level(100, 100) != Rejecting { t.Fatal("full should be REJECTING") }
 }
+
+
+type fakeLedger struct {
+	status LedgerTxStatus
+	err error
+	calls int
+}
+func (f *fakeLedger) Status(context.Context, string) (LedgerTxStatus, error) {
+	f.calls++
+	return f.status, f.err
+}
+
+func TestReconcilerClassifiesLedgerState(t *testing.T) {
+	f := &fakeLedger{status: LedgerCommitted}
+	r := NewReconciler(f)
+	status, err := r.Reconcile(context.Background(), "tx-1")
+	if err != nil || status != LedgerCommitted { t.Fatalf("status=%s err=%v", status, err) }
+	if f.calls != 1 { t.Fatalf("calls=%d want=1", f.calls) }
+
+	f.status = LedgerNotCommitted
+	status, err = r.Reconcile(context.Background(), "tx-2")
+	if err != nil || status != LedgerNotCommitted { t.Fatalf("status=%s err=%v", status, err) }
+
+	f.status = LedgerUnknown
+	if _, err = r.Reconcile(context.Background(), "tx-3"); err != ErrLedgerStateUnknown {
+		t.Fatalf("expected unknown-state error, got %v", err)
+	}
+}
