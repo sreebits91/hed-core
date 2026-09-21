@@ -104,6 +104,16 @@ jobs:
         working-directory: /tmp
         run: |
           git clone --depth 1 --branch release-2.2 https://github.com/hyperledger/fabric-samples.git
+
+          # release-2.2 network.sh expects the legacy docker-compose command and
+          # Fabric CLI binaries in fabric-samples/bin.
+          printf '#!/usr/bin/env bash\nexec docker compose "$@"\n' | sudo tee /usr/local/bin/docker-compose >/dev/null
+          sudo chmod +x /usr/local/bin/docker-compose
+
+          curl -sSLO https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh
+          chmod +x install-fabric.sh
+          ./install-fabric.sh --fabric-version 2.2.20 --ca-version 1.5.17 binary docker
+
           cd fabric-samples/test-network
           ./network.sh down
           ./network.sh up createChannel -ca -c mychannel
