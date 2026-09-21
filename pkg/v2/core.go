@@ -55,8 +55,7 @@ type WALRecord struct{Kind string `json:"kind"`;Tx Tx `json:"tx,omitempty"`;ID s
 type WAL struct{mu sync.Mutex;f *os.File;syncOnWrite bool}
 func OpenWAL(path string,syncOnWrite bool)(*WAL,error){if path==""{return nil,nil};f,e:=os.OpenFile(path,os.O_CREATE|os.O_RDWR|os.O_APPEND,0600);if e!=nil{return nil,e};return &WAL{f:f,syncOnWrite:syncOnWrite},nil}
 func recordChecksum(k string,tx Tx,id string)uint32{b,_:=json.Marshal(struct{K string;T Tx;I string}{k,tx,id});return crc32.ChecksumIEEE(b)}
-func(w *WAL)appendRecord(r WALRecord)error{b,e:=json.Marshal(r);if e!=nil{return e};if _,e=w.f.Write(append(b,'
-'));e!=nil{return e};if w.syncOnWrite{return w.f.Sync()};return nil}
+func(w *WAL)appendRecord(r WALRecord)error{b,e:=json.Marshal(r);if e!=nil{return e};if _,e=w.f.Write(append(b,'\n'));e!=nil{return e};if w.syncOnWrite{return w.f.Sync()};return nil}
 func(w *WAL)Append(tx Tx)error{if w==nil{return nil};w.mu.Lock();defer w.mu.Unlock();return w.appendRecord(WALRecord{Kind:"prepare",Tx:tx,Checksum:recordChecksum("prepare",tx,"")})}
 func(w *WAL)Commit(id string)error{if w==nil{return nil};w.mu.Lock();defer w.mu.Unlock();return w.appendRecord(WALRecord{Kind:"commit",ID:id,Checksum:recordChecksum("commit",Tx{},id)})}
 func(w *WAL)Abort(id string)error{if w==nil{return nil};w.mu.Lock();defer w.mu.Unlock();return w.appendRecord(WALRecord{Kind:"abort",ID:id,Checksum:recordChecksum("abort",Tx{},id)})}
