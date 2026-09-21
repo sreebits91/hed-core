@@ -43,14 +43,13 @@ jobs:
       - name: Verify toolchain
         run: go version
 
-      - name: Gofmt changed Go files
+      - name: Gofmt check
         shell: bash
         run: |
           set -euo pipefail
-          base="${{ github.event.pull_request.base.sha || github.event.before }}"
-          changed=$(git diff --name-only "$base" "$GITHUB_SHA" -- '*.go' | grep -v '^vendor/' || true)
-          if [[ -z "$changed" ]]; then exit 0; fi
-          bad=$(echo "$changed" | xargs gofmt -l || true)
+          files=$(git ls-files '*.go' | grep -v '^vendor/' || true)
+          if [[ -z "$files" ]]; then exit 0; fi
+          bad=$(echo "$files" | xargs gofmt -l || true)
           if [[ -n "$bad" ]]; then echo "$bad"; exit 1; fi
 
       - name: Go vet
@@ -61,7 +60,6 @@ jobs:
         run: go test -race ./...
       - name: Load-level regression
         run: go test -run '^TestHLFLoadLevels
-      - name: Security scan
         shell: bash
         run: |
           set -euo pipefail
@@ -75,53 +73,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: false
-          fetch-depth: 1
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.26.6'
+          go-version: '1.26.8'
           cache: true
       - name: 100K benchmark smoke
         run: |
           set -euo pipefail
-          GOFLAGS=-mod=mod go test -run '^$' -bench '^BenchmarkHLFLoad100K$' -benchtime=1x -count=1 ./pkg/hlf | tee benchmark-100K.txt
-          grep -Eq 'BenchmarkHLFLoad100K(-[0-9]+)?[[:space:]]+[0-9]+' benchmark-100K.txt
-      - name: Upload benchmark
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: hed-quality-benchmark
-          path: benchmark-100K.txt
-          if-no-files-found: error
- -v ./pkg/hlf
-      - name: Security scan
-        shell: bash
-        run: |
-          set -euo pipefail
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          "$(go env GOPATH)/bin/govulncheck" ./...
-
-  benchmark-smoke:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: verify
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: false
-          fetch-depth: 1
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.26.6'
-          cache: true
-      - name: 100K benchmark smoke
-        run: |
-          set -euo pipefail
-          GOFLAGS=-mod=mod go test -run '^$' -bench '^BenchmarkHLFLoad100K$' -benchtime=1x -count=1 ./pkg/hlf | tee benchmark-100K.txt
+          GOFLAGS=-mod=mod go test -run '^ -bench '^BenchmarkHLFLoad100K -benchtime=1x -count=1 ./pkg/hlf | tee benchmark-100K.txt
           grep -Eq 'BenchmarkHLFLoad100K(-[0-9]+)?[[:space:]]+[0-9]+' benchmark-100K.txt
       - name: Upload benchmark
         if: always()
