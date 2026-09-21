@@ -31,7 +31,7 @@ func New(cfg Config)(*Backend,error){
 	return &Backend{gateway:gw,contract:gw.GetNetwork(cfg.Channel).GetContract(cfg.Chaincode),conn:conn,cfg:cfg},nil
 }
 
-func (b *Backend) Commit(ctx context.Context,tx v2.Tx) error { if b==nil||b.contract==nil{return fmt.Errorf("Fabric Gateway backend is not initialized")};if e:=ctx.Err();e!=nil{return e};_,commit,e:=b.contract.SubmitAsync(b.cfg.Function,client.WithArguments(tx.ID,string(tx.Payload)));if e!=nil{return fmt.Errorf("Fabric submission failed for HED tx %s: %w",tx.ID,e)};status,e:=commit.Status();if e!=nil{return fmt.Errorf("Fabric commit confirmation failed for HED tx %s: %w",tx.ID,e)};if !status.Successful{return fmt.Errorf("Fabric ledger rejected HED tx %s: validation_code=%d fabric_tx_id=%s",tx.ID,status.Code,status.TransactionID)};return nil }
+func (b *Backend) Commit(ctx context.Context,tx v2.Tx) error { if ctx==nil { ctx=context.Background() }; if e:=ctx.Err();e!=nil{return e}; if b==nil||b.contract==nil{return fmt.Errorf("Fabric Gateway backend is not initialized")};_,commit,e:=b.contract.SubmitAsync(b.cfg.Function,client.WithArguments(tx.ID,string(tx.Payload)));if e!=nil{return fmt.Errorf("Fabric submission failed for HED tx %s: %w",tx.ID,e)};status,e:=commit.Status();if e!=nil{return fmt.Errorf("Fabric commit confirmation failed for HED tx %s: %w",tx.ID,e)};if !status.Successful{return fmt.Errorf("Fabric ledger rejected HED tx %s: validation_code=%d fabric_tx_id=%s",tx.ID,status.Code,status.TransactionID)};return nil }
 
 // Status implements v2.LedgerState. It reads the HED idempotency key directly
 // from the ledger, which lets recovery distinguish a committed transaction
