@@ -18,6 +18,8 @@ type BatchConfig struct {
 	Partitions   int
 }
 
+type BatchCommitFunc func(context.Context, []*engine.TxPayload) error
+
 type HLFCommitter struct {
 	txQueues  []chan *engine.TxPayload
 	committed uint64
@@ -29,6 +31,7 @@ type HLFCommitter struct {
 	wg        sync.WaitGroup
 	stopOnce  sync.Once
 	stopped   atomic.Bool
+	commitFn  BatchCommitFunc
 }
 
 func NewHLFCommitter(cfg BatchConfig) *HLFCommitter {
@@ -156,11 +159,19 @@ func (c *HLFCommitter) partitionFor(tx *engine.TxPayload) int {
 }
 
 func (c *HLFCommitter) flushBatch(batch []*engine.TxPayload) {
-	// This is the HED commit accounting boundary. Actual Fabric ordering and
-	// validation remain owned by the Fabric adapter/deployer; this component
-	// measures the high-throughput handoff into that boundary.
+	if len(batch) == 0 { return }
+	if c.commitFn != nil {
+		if err := c.commitFn(c.ctx, batch); err != nil {
+			atomic.AddUint64(&c.failed, uint64(len(batch)))
+			return
+		}
+	}
 	atomic.AddUint64(&c.committed, uint64(len(batch)))
 }
+
+// SetCommitFunc installs the real Fabric Gateway commit boundary. A nil
+// callback keeps the committer useful for deterministic load tests.
+func (c *HLFCommitter) SetCommitFunc(fn BatchCommitFunc) { c.commitFn = fn }
 
 func (c *HLFCommitter) TotalCommitted() uint64 {
 	return atomic.LoadUint64(&c.committed)
