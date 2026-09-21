@@ -16,3 +16,7 @@ profiling/
 .DS_Store
 .idea/
 .vscode/
+
+# Fabric private keys
+*.key
+**/priv_sk
