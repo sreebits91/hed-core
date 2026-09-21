@@ -37,6 +37,7 @@ type TxPayload struct {
 
 type Pipeline struct {
 	db          plugin.StateEngine
+	dbMu        sync.RWMutex
 	shards      atomic.Int64
 	subscribers map[chan Event]bool
 	subMux      sync.RWMutex
@@ -63,7 +64,9 @@ func NewPipeline(db plugin.StateEngine, initialShards int) *Pipeline {
 }
 
 func (p *Pipeline) SetStorageEngine(db plugin.StateEngine) {
+	p.dbMu.Lock()
 	p.db = db
+	p.dbMu.Unlock()
 	if db != nil {
 		p.engineName.Store(db.Name())
 		p.EmitEvent(EventSys, "", "", fmt.Sprintf("Switched active storage engine to [%s]", db.Name()), 0)
@@ -92,10 +95,13 @@ func (p *Pipeline) SubmitTransaction(tx *TxPayload) (string, int64, error) {
 	}
 	shardName := fmt.Sprintf("shard-%d", shardIdx)
 
-	if p.db != nil {
+	p.dbMu.RLock()
+	db := p.db
+	p.dbMu.RUnlock()
+	if db != nil {
 		key := "acc:" + tx.AccountID
 		val := []byte(fmt.Sprintf("%d", tx.Amount))
-		if err := p.db.PutState(shardName, key, val); err != nil {
+		if err := db.PutState(shardName, key, val); err != nil {
 			atomic.AddUint64(&p.failed, 1)
 			p.EmitEvent(EventErr, shardName, tx.TxUUID, fmt.Sprintf("Execution failed on engine [%s]: %v", p.EngineName(), err), 0)
 			return shardName, time.Since(start).Microseconds(), err
