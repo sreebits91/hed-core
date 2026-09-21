@@ -29,13 +29,13 @@ func NewRouter(n int)(*Router,error){if n<=0{return nil,ErrInvalidConfig};return
 func(r *Router)Partition(key string)int{h:=fnv.New64a();_,_=h.Write([]byte(key));return int(h.Sum64()%uint64(r.partitions))}
 func(r *Router)PartitionCount()int{return r.partitions}
 
-type Queue struct{mu sync.Mutex;items []Tx;cap int;closed bool;notify chan struct{}}
-func NewQueue(n int)(*Queue,error){if n<=0{return nil,ErrInvalidConfig};return &Queue{items:make([]Tx,0,n),cap:n,notify:make(chan struct{},1)},nil}
-func(q *Queue)Push(tx Tx)error{q.mu.Lock();defer q.mu.Unlock();if q.closed{return ErrEngineStopped};if len(q.items)>=q.cap{return ErrQueueFull};q.items=append(q.items,tx);select{case q.notify<-struct{}{}:default:};return nil}
+type Queue struct{items chan Tx;cap int;closed atomic.Bool;notify chan struct{};depth atomic.Int64}
+func NewQueue(n int)(*Queue,error){if n<=0{return nil,ErrInvalidConfig};return &Queue{items:make(chan Tx,n),cap:n,notify:make(chan struct{},1)},nil}
+func(q *Queue)Push(tx Tx)error{if q.closed.Load(){return ErrEngineStopped};select{case q.items<-tx:q.depth.Add(1);select{case q.notify<-struct{}{}:default:};return nil;default:return ErrQueueFull}}
 func(q *Queue)PopBatch(n int)([]Tx,bool){return q.PopBatchInto(nil,n)}
-func(q *Queue)PopBatchInto(out []Tx,n int)([]Tx,bool){q.mu.Lock();defer q.mu.Unlock();if len(q.items)==0{return nil,q.closed};if n<=0||n>len(q.items){n=len(q.items)};if cap(out)<n{out=make([]Tx,n)}else{out=out[:n]};copy(out,q.items[:n]);copy(q.items,q.items[n:]);q.items=q.items[:len(q.items)-n];return out,false}
-func(q *Queue)Close(){q.mu.Lock();if !q.closed{q.closed=true;select{case q.notify<-struct{}{}:default:}};q.mu.Unlock()}
-func(q *Queue)Len()int{q.mu.Lock();defer q.mu.Unlock();return len(q.items)}
+func(q *Queue)PopBatchInto(out []Tx,n int)([]Tx,bool){if n<=0{n=1};first,ok:=<-q.items;if !ok{return nil,true};q.depth.Add(-1);if cap(out)<n{out=make([]Tx,n)}else{out=out[:n]};out[0]=first;count:=1;for count<n{select{case tx:=<-q.items:out[count]=tx;count++;q.depth.Add(-1);default:return out[:count],false}};return out[:count],false}
+func(q *Queue)Close(){if q.closed.CompareAndSwap(false,true){select{case q.notify<-struct{}{}:default:}}}
+func(q *Queue)Len()int{v:=q.depth.Load();if v<0{return 0};return int(v)}
 func(q *Queue)Cap()int{return q.cap}
 
 type BackpressureLevel string
