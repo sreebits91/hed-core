@@ -21,7 +21,7 @@ var ( ErrInvalidTxID=errors.New("invalid transaction id"); ErrPayloadTooLarge=er
 type Tx struct { ID string `json:"id"`; Key string `json:"key"`; Payload []byte `json:"payload"`; Partition int `json:"partition"`; Sequence uint64 `json:"sequence"` }
 type Config struct { Partitions,QueueCapacity,BatchSize,MaxPayloadBytes,DedupCapacity int; FlushInterval,DedupTTL,CommitTimeout time.Duration; Retry RetryPolicy; WALPath string; SyncWAL bool }
 func DefaultConfig() Config{return Config{Partitions:8,QueueCapacity:65536,BatchSize:256,FlushInterval:2*time.Millisecond,MaxPayloadBytes:1<<20,DedupCapacity:1_000_000,DedupTTL:10*time.Minute,CommitTimeout:5*time.Second,Retry:RetryPolicy{MaxAttempts:5,InitialBackoff:2*time.Millisecond,MaxBackoff:250*time.Millisecond}}}
-func(c Config)Validate()error{if c.Partitions<=0||c.QueueCapacity<=0||c.BatchSize<=0||c.FlushInterval<=0||c.MaxPayloadBytes<=0||c.DedupCapacity<=0||c.DedupTTL<=0||c.CommitTimeout<=0||c.Retry.MaxAttempts<=0||c.Retry.InitialBackoff<=0||c.Retry.MaxBackoff<c.Retry.InitialBackoff{return ErrInvalidConfig};return nil}
+func(c Config)Validate()error{if c.Partitions<=0||c.QueueCapacity<=0||c.BatchSize<=0||c.FlushInterval<=0||c.MaxPayloadBytes<=0||c.DedupCapacity<=0||c.DedupTTL<=0||c.CommitTimeout<0||c.Retry.MaxAttempts<=0||c.Retry.InitialBackoff<=0||c.Retry.MaxBackoff<c.Retry.InitialBackoff{return ErrInvalidConfig};return nil}
 func ValidateTx(tx Tx,maxPayload int)error{if len(tx.ID)==0||len(tx.ID)>256{return ErrInvalidTxID};for _,r:=range tx.ID{if !(r>='a'&&r<='z')&&!(r>='A'&&r<='Z')&&!(r>='0'&&r<='9')&&r!='-'&&r!='_'&&r!='.'{return ErrInvalidTxID}};if maxPayload<=0||len(tx.Payload)>maxPayload{return ErrPayloadTooLarge};return nil}
 
 type Router struct{partitions int}
