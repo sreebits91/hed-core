@@ -3,8 +3,10 @@ package v2
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestWALAbortDoesNotReplay(t *testing.T) {
@@ -93,8 +95,8 @@ func TestConcurrentIngressIsLossless(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < perProducer; i++ {
 				_, err := p.Submit(context.Background(), Tx{
-					ID:      "concurrent-" + itoa(producer) + "-" + itoa(i),
-					Key:      "account-" + itoa(i%64),
+					ID:      "concurrent-" + strconv.Itoa(producer) + "-" + strconv.Itoa(i),
+					Key:      "account-" + strconv.Itoa(i%64),
 					Payload: []byte("payload"),
 				})
 				if err != nil {
@@ -114,4 +116,26 @@ func TestConcurrentIngressIsLossless(t *testing.T) {
 	if accepted != producers*perProducer {
 		t.Fatalf("accepted=%d want=%d", accepted, producers*perProducer)
 	}
+}
+
+
+func TestDedupForgetRemainsBounded(t *testing.T) {
+	d, err := NewDedup(32, time.Hour)
+	if err != nil { t.Fatal(err) }
+	now := time.Now()
+	for i := 0; i < 10000; i++ {
+		id := strconv.Itoa(i)
+		d.SeenOrAdd(id, now)
+		d.Forget(id)
+	}
+	if len(d.m) > 32 || len(d.order) > 64 {
+		t.Fatalf("dedup grew unexpectedly: map=%d order=%d", len(d.m), len(d.order))
+	}
+}
+
+func TestBackpressureLevels(t *testing.T) {
+	if Level(0, 100) != Normal { t.Fatal("0 should be NORMAL") }
+	if Level(50, 100) != Busy { t.Fatal("50% should be BUSY") }
+	if Level(80, 100) != Saturated { t.Fatal("80% should be SATURATED") }
+	if Level(100, 100) != Rejecting { t.Fatal("full should be REJECTING") }
 }
