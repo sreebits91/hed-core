@@ -22,7 +22,7 @@ type RecoveryReport struct { Replayed int; AlreadyPresent int; Committed int; Pe
 func (w *WAL) ReplayIDs() (map[string]struct{}, error) {
 	ids:=map[string]struct{}{}; if w==nil{return ids,nil}; w.mu.Lock();defer w.mu.Unlock()
 	if _,err:=w.f.Seek(0,0);err!=nil{return nil,err}; r:=bufio.NewReader(w.f)
-	for { line,err:=r.ReadBytes('\n'); if err!=nil&&len(line)==0 {if err==io.EOF{break};return nil,err}; if len(line)==0 {if err!=nil{break};continue}; var rec WALRecord; if json.Unmarshal(line,&rec)!=nil||rec.Checksum!=recordChecksum(rec.Kind,rec.Tx,rec.ID){return nil,ErrWALCorrupt}; if rec.Kind=="prepare"{ids[rec.Tx.ID]=struct{}{}}else if rec.Kind=="abort"{delete(ids,rec.ID)}; if err!=nil{break} }
+	for { line,err:=r.ReadBytes('\n'); if err!=nil&&len(line)==0 {if err==io.EOF{break};return nil,err}; if len(line)==0 {if err!=nil{break};continue}; var rec WALRecord; if json.Unmarshal(line,&rec)!=nil||rec.Checksum!=recordChecksum(rec.Kind,rec.Tx,rec.ID){return nil,ErrWALCorrupt}; if rec.Kind=="prepare"{ids[rec.Tx.ID]=struct{}{}}; if err!=nil{break} }
 	return ids,nil
 }
 
@@ -32,7 +32,7 @@ func(p *Pipeline) Recover(ctx context.Context)(RecoveryReport,error){
 	start:=time.Now();var report RecoveryReport;if ctx==nil{ctx=context.Background()};if p==nil||p.wal==nil{return report,nil}
 	ids,err:=p.wal.ReplayIDs();if err!=nil{return report,err};now:=time.Now();for id:=range ids{p.dedup.SeenOrAdd(id,now)}
 	txs,err:=p.wal.Replay();if err!=nil{return report,err};sort.Slice(txs,func(i,j int)bool{if txs[i].Partition==txs[j].Partition{return txs[i].Sequence<txs[j].Sequence};return txs[i].Partition<txs[j].Partition})
-	for _,tx:=range txs{if err:=ctx.Err();err!=nil{return report,err};idx:=tx.Partition;if idx<0||idx>=len(p.parts){return report,ErrInvalidConfig};if current:=p.parts[idx].seq.Load();tx.Sequence>current{p.parts[idx].seq.Store(tx.Sequence)};if err:=p.parts[idx].q.Push(tx);err!=nil{return report,err};report.Replayed++;atomic.AddUint64(&p.metrics.partitions[idx].accepted,1);atomic.StoreUint64(&p.metrics.partitions[idx].queueDepth,uint64(p.parts[idx].q.Len()))}
+	for _,tx:=range txs{if err:=ctx.Err();err!=nil{return report,err};idx:=tx.Partition;if idx<0||idx>=len(p.parts){return report,ErrInvalidConfig};if err:=p.parts[idx].q.Push(tx);err!=nil{return report,err};report.Replayed++;atomic.AddUint64(&p.metrics.partitions[idx].accepted,1);atomic.StoreUint64(&p.metrics.partitions[idx].queueDepth,uint64(p.parts[idx].q.Len()))}
 	report.Pending=report.Replayed;report.Duration=time.Since(start);p.metrics.recovered.Add(uint64(report.Replayed));return report,nil
 }
 
