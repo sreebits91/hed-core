@@ -112,7 +112,7 @@ jobs:
 
           curl -sSLO https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh
           chmod +x install-fabric.sh
-          ./install-fabric.sh --fabric-version 2.2.20 --ca-version 1.5.17 binary docker
+          ./install-fabric.sh --fabric-version 2.2.15 --ca-version 1.5.17 binary docker
 
           cd fabric-samples/test-network
           ./network.sh down
