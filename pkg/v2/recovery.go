@@ -34,7 +34,7 @@ func(p *Pipeline) Recover(ctx context.Context)(RecoveryReport,error){
 	ids,err:=p.wal.ReplayIDs();if err!=nil{return report,err};now:=time.Now();for id:=range ids{p.dedup.SeenOrAdd(id,now)}
 	txs,err:=p.wal.Replay();if err!=nil{return report,err};sort.Slice(txs,func(i,j int)bool{if txs[i].Partition==txs[j].Partition{return txs[i].Sequence<txs[j].Sequence};return txs[i].Partition<txs[j].Partition})
 	for _,tx:=range txs{if err:=ctx.Err();err!=nil{return report,err};idx:=tx.Partition;if idx<0||idx>=len(p.parts){report.Unknown++;continue};if tx.Sequence>p.parts[idx].seq.Load(){p.parts[idx].seq.Store(tx.Sequence)};if err:=p.parts[idx].q.Push(tx);err!=nil{report.Pending++;continue};report.Replayed++;atomic.AddUint64(&p.metrics.partitions[idx].accepted,1);atomic.StoreUint64(&p.metrics.partitions[idx].queueDepth,uint64(p.parts[idx].q.Len()))}
-	report.Pending=report.Replayed;report.Duration=time.Since(start);p.metrics.recovered.Add(uint64(report.Replayed));return report,nil
+	report.Duration=time.Since(start);p.metrics.recovered.Add(uint64(report.Replayed));return report,nil
 }
 
 type Reconciler struct{ledger LedgerState}
