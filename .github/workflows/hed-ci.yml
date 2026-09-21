@@ -55,7 +55,7 @@ jobs:
 
   performance:
     name: Performance qualification
-    if: github.event_name == 'workflow_dispatch' && inputs.run_performance
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.run_performance)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,7 +70,7 @@ jobs:
 
   profiling:
     name: CPU allocation mutex block profiling
-    if: github.event_name == 'workflow_dispatch' && inputs.run_performance
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.run_performance)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
