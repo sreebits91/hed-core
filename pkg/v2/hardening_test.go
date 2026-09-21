@@ -170,3 +170,29 @@ func TestReconcilerClassifiesLedgerState(t *testing.T) {
 		t.Fatalf("expected unknown-state error, got %v", err)
 	}
 }
+
+
+func TestQueueFullAbortsWALAndAllowsRetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hed.wal")
+	cfg := DefaultConfig()
+	cfg.Partitions = 1
+	cfg.QueueCapacity = 1
+	cfg.WALPath = path
+	cfg.BatchSize = 1
+	cfg.FlushInterval = time.Hour
+	p, err := NewPipeline(cfg, nil)
+	if err != nil { t.Fatal(err) }
+
+	tx1 := Tx{ID: "queue-one", Key: "k", Payload: []byte("x")}
+	if _, err = p.Submit(context.Background(), tx1); err != nil { t.Fatal(err) }
+	tx2 := Tx{ID: "queue-two", Key: "k", Payload: []byte("x")}
+	if _, err = p.Submit(context.Background(), tx2); err != ErrQueueFull { t.Fatalf("err=%v want queue full", err) }
+	p.Stop()
+
+	w, err := OpenWAL(path, false)
+	if err != nil { t.Fatal(err) }
+	defer w.Close()
+	txs, err := w.Replay()
+	if err != nil { t.Fatal(err) }
+	if len(txs) != 1 || txs[0].ID != tx1.ID { t.Fatalf("WAL pending=%+v", txs) }
+}
