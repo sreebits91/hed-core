@@ -21,6 +21,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GOFLAGS: "-mod=mod"
+
 jobs:
   quality:
     name: Go quality gates
