@@ -68,6 +68,9 @@ func TestRecoveryRestoresSequenceCounter(t *testing.T) {
 	if got := p.parts[0].seq.Load(); got != 41 {
 		t.Fatalf("sequence=%d want=41", got)
 	}
+	second, err := p.Recover(context.Background())
+	if err != nil { t.Fatal(err) }
+	if second.Replayed != 0 || second.AlreadyPresent != 1 { t.Fatalf("second recovery=%+v; recovery must be idempotent", second) }
 }
 
 func TestConcurrentIngressIsLossless(t *testing.T) {
