@@ -32,7 +32,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           : > artifacts/qualification.txt
-          for tx in 100000 250000 500000 1000000 5000000; do
+          for tx in 100000 250000 500000 1000000 2700000 5000000; do
             echo "===== ${tx} transactions =====" | tee -a artifacts/qualification.txt
             timeout 15m /tmp/hed-loadtest -tx "$tx" -workers 256 | tee -a artifacts/qualification.txt
           done
