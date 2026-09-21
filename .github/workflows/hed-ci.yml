@@ -64,9 +64,9 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: 100K / 250K / 500K qualification
-        run: HED_PERF_LEVELS=0 go test ./pkg/hlf -run TestHLFLoadLevels -count=1 -timeout=2m
+        run: HED_PERF_LEVELS=0 go test -v ./pkg/hlf -run TestHLFLoadLevels -count=1 -timeout=2m
       - name: Extended performance ladder
-        run: HED_PERF_LEVELS=1 go test ./pkg/hlf -run TestHLFLoadLevels -count=1 -timeout=5m
+        run: HED_PERF_LEVELS=1 go test -v ./pkg/hlf -run TestHLFLoadLevels -count=1 -timeout=5m
 
   profiling:
     name: CPU allocation mutex block profiling
