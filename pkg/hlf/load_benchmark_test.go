@@ -3,6 +3,7 @@ package hlf
 import (
 	"os"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
@@ -67,7 +68,7 @@ func loadLevelName(n int) string {
 	case 500_000:
 		return "500K"
 	default:
-		return "load"
+		return strconv.FormatInt(int64(n), 10)
 	}
 }
 
