@@ -105,7 +105,7 @@ jobs:
       - name: Start local Fabric test network
         working-directory: /tmp
         run: |
-          git clone --depth 1 --branch release-2.5 https://github.com/hyperledger/fabric-samples.git
+          git clone --depth 1 https://github.com/hyperledger/fabric-samples.git
           printf '#!/usr/bin/env bash\nexec docker compose "$@"\n' | sudo tee /usr/local/bin/docker-compose >/dev/null
           sudo chmod +x /usr/local/bin/docker-compose
           curl -sSLO https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh
