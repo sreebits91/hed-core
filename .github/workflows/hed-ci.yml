@@ -136,6 +136,8 @@ jobs:
       - name: Validate Fabric configuration
         working-directory: integration/fabric-gateway
         run: go test . -run 'Test(ConfigValidation|DefaultLocalConfig|ReadPEM|UninitializedBackendCommitFailsWithoutNetwork|ContextCancellationDoesNotSubmit)
+        working-directory: integration/fabric-gateway
+        run: go test . -count=1 -timeout=15m
         env:
           HED_FABRIC_E2E: "1"
           HED_FABRIC_FAILURE: "1"
@@ -144,6 +146,9 @@ jobs:
         working-directory: /tmp/fabric-samples/test-network
         run: ./network.sh down || true
  -count=1
+        env:
+          HED_FABRIC_E2E: "1"
+          HED_FABRIC_FAILURE: "1"
       - name: Run live Fabric tests
         working-directory: integration/fabric-gateway
         run: go test . -count=1 -timeout=15m
