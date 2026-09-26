@@ -134,9 +134,19 @@ jobs:
           echo "FABRIC_CHAINCODE=hed" >> "$GITHUB_ENV"
           echo "FABRIC_FUNCTION=Commit" >> "$GITHUB_ENV"
       - name: Validate Fabric configuration
-        run: go test ./integration/fabric-gateway -run 'Test(ConfigValidation|DefaultLocalConfig|ReadPEM|UninitializedBackendCommitFailsWithoutNetwork|ContextCancellationDoesNotSubmit)$' -count=1
+        working-directory: integration/fabric-gateway
+        run: go test . -run 'Test(ConfigValidation|DefaultLocalConfig|ReadPEM|UninitializedBackendCommitFailsWithoutNetwork|ContextCancellationDoesNotSubmit)
+        env:
+          HED_FABRIC_E2E: "1"
+          HED_FABRIC_FAILURE: "1"
+      - name: Stop Fabric test network
+        if: always()
+        working-directory: /tmp/fabric-samples/test-network
+        run: ./network.sh down || true
+ -count=1
       - name: Run live Fabric tests
-        run: go test ./integration/fabric-gateway -count=1 -timeout=15m
+        working-directory: integration/fabric-gateway
+        run: go test . -count=1 -timeout=15m
         env:
           HED_FABRIC_E2E: "1"
           HED_FABRIC_FAILURE: "1"
