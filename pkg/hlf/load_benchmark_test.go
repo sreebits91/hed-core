@@ -16,6 +16,7 @@ func newBenchmarkCommitter() *HLFCommitter {
 		FlushTimeout: time.Millisecond,
 		WorkerCount:  32,
 		QueueSize:    500000,
+		Partitions:   32,
 	})
 }
 
