@@ -106,16 +106,11 @@ jobs:
         working-directory: /tmp
         run: |
           git clone --depth 1 --branch release-2.2 https://github.com/hyperledger/fabric-samples.git
-
-          # release-2.2 network.sh expects the legacy docker-compose command and
-          # Fabric CLI binaries in fabric-samples/bin.
           printf '#!/usr/bin/env bash\nexec docker compose "$@"\n' | sudo tee /usr/local/bin/docker-compose >/dev/null
           sudo chmod +x /usr/local/bin/docker-compose
-
           curl -sSLO https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh
           chmod +x install-fabric.sh
           ./install-fabric.sh --fabric-version 2.2.15 --ca-version 1.5.17 binary docker
-
           cd fabric-samples/test-network
           ./network.sh down
           ./network.sh up createChannel -ca -c mychannel
@@ -137,17 +132,7 @@ jobs:
           echo "FABRIC_FUNCTION=Commit" >> "$GITHUB_ENV"
       - name: Validate Fabric configuration
         working-directory: integration/fabric-gateway
-        run: go test . -run 'Test(ConfigValidation|DefaultLocalConfig|ReadPEM|UninitializedBackendCommitFailsWithoutNetwork|ContextCancellationDoesNotSubmit)
-        working-directory: integration/fabric-gateway
-        run: go test . -count=1 -timeout=15m
-        env:
-          HED_FABRIC_E2E: "1"
-          HED_FABRIC_FAILURE: "1"
-      - name: Stop Fabric test network
-        if: always()
-        working-directory: /tmp/fabric-samples/test-network
-        run: ./network.sh down || true
- -count=1
+        run: go test . -run 'Test(ConfigValidation|DefaultLocalConfig|ReadPEM|UninitializedBackendCommitFailsWithoutNetwork|ContextCancellationDoesNotSubmit)$' -count=1
         env:
           HED_FABRIC_E2E: "1"
           HED_FABRIC_FAILURE: "1"
