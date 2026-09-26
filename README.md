@@ -62,3 +62,9 @@ And confirm the live metrics endpoint responds:
 ```bash
 curl http://127.0.0.1:8080/api/metrics
 ```
+
+## Stable version
+
+The current HED Core v2 baseline is **2.0.0-stable**. The stable performance reference point is the **2.7M transaction qualification**; 5M remains an optimization/qualification target rather than a claimed stable throughput number.
+
+The declared version is recorded in `VERSION` and the CI workflow runs the 2.7M baseline explicitly before the extended ladder.
