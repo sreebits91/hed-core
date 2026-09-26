@@ -1,8 +1,8 @@
 package hlf
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -58,8 +58,11 @@ func (d *Deployer) RegisterListener(ch chan string) {
 	d.listeners[ch] = true
 
 	for _, pastLog := range d.logHistory {
-		jsonPayload := fmt.Sprintf(`{"stages": %s, "log": %q}`, d.serializeStages(), pastLog)
-		ch <- fmt.Sprintf("data: %s\n\n", jsonPayload)
+		payload := d.eventPayload(pastLog)
+		select {
+		case ch <- fmt.Sprintf("data: %s\n\n", payload):
+		default:
+		}
 	}
 }
 
@@ -74,7 +77,7 @@ func (d *Deployer) broadcast(logLine string) {
 	defer d.mu.Unlock()
 
 	d.logHistory = append(d.logHistory, logLine)
-	jsonPayload := fmt.Sprintf(`{"stages": %s, "log": %q}`, d.serializeStages(), logLine)
+	jsonPayload := d.eventPayload(logLine)
 
 	for ch := range d.listeners {
 		select {
@@ -84,18 +87,16 @@ func (d *Deployer) broadcast(logLine string) {
 	}
 }
 
-func (d *Deployer) serializeStages() string {
-	var buf bytes.Buffer
-	buf.WriteString("[")
-	for i, s := range d.stages {
-		if i > 0 {
-			buf.WriteString(",")
-		}
-		buf.WriteString(fmt.Sprintf(`{"id":%q,"name":%q,"description":%q,"status":%q,"duration":%q,"color":%q}`,
-			s.ID, s.Name, s.Description, s.Status, s.Duration, s.Color))
+func (d *Deployer) eventPayload(logLine string) string {
+	payload := struct {
+		Stages []*DeploymentStage `json:"stages"`
+		Log    string              `json:"log"`
+	}{Stages: d.stages, Log: logLine}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return `{"stages":[],"log":"serialization error"}`
 	}
-	buf.WriteString("]")
-	return buf.String()
+	return string(b)
 }
 
 func (d *Deployer) RunDeployment() {
@@ -268,23 +269,28 @@ func (d *Deployer) executeStage(ctx context.Context, idx int, fn func(context.Co
 		return err
 	}
 
+	d.mu.Lock()
 	s := d.stages[idx]
 	s.Status = StatusInProgress
+	d.mu.Unlock()
 	start := time.Now()
 	d.broadcast(fmt.Sprintf("=== Starting Stage: %s ===", s.Name))
 
 	err := fn(ctx)
+	d.mu.Lock()
 	s.Duration = time.Since(start).Round(time.Millisecond).String()
 	if err != nil {
 		if ctx.Err() != nil {
 			err = ctx.Err()
 		}
 		s.Status = StatusFailed
+		d.mu.Unlock()
 		d.broadcast(fmt.Sprintf("❌ Error in %s: %v", s.Name, err))
 		return fmt.Errorf("%s: %w", s.Name, err)
 	}
 
 	s.Status = StatusCompleted
+	d.mu.Unlock()
 	d.broadcast(fmt.Sprintf("✅ Completed Stage: %s in %s", s.Name, s.Duration))
 	return nil
 }
