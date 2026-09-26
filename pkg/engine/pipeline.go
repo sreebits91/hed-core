@@ -96,8 +96,8 @@ func (p *Pipeline) SubmitTransaction(tx *TxPayload) (string, int64, error) {
 	shardName := fmt.Sprintf("shard-%d", shardIdx)
 
 	p.dbMu.RLock()
+	defer p.dbMu.RUnlock()
 	db := p.db
-	p.dbMu.RUnlock()
 	if db != nil {
 		key := "acc:" + tx.AccountID
 		val := []byte(fmt.Sprintf("%d", tx.Amount))
