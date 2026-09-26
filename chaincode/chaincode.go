@@ -17,10 +17,12 @@ func (s *SmartContract) Commit(ctx contractapi.TransactionContextInterface, hedT
 	return nil
 }
 
-func (s *SmartContract) GetByHEDID(ctx contractapi.TransactionContextInterface, hedTxID string) ([]byte, error) {
-	if hedTxID == "" { return nil, fmt.Errorf("HED transaction ID is required") }
-	key, err := ctx.GetStub().CreateCompositeKey("HEDTx", []string{hedTxID}); if err != nil { return nil, fmt.Errorf("create HED transaction key: %w", err) }
-	return ctx.GetStub().GetState(key)
+func (s *SmartContract) GetByHEDID(ctx contractapi.TransactionContextInterface, hedTxID string) (string, error) {
+	if hedTxID == "" { return "", fmt.Errorf("HED transaction ID is required") }
+	key, err := ctx.GetStub().CreateCompositeKey("HEDTx", []string{hedTxID}); if err != nil { return "", fmt.Errorf("create HED transaction key: %w", err) }
+	value, err := ctx.GetStub().GetState(key)
+	if err != nil { return "", err }
+	return string(value), nil
 }
 
 func main() {
