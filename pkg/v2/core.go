@@ -48,7 +48,7 @@ type dedupEntry struct{expires time.Time}
 const dedupShards=32
 type dedupShard struct{mu sync.Mutex;m map[string]dedupEntry;order []string;capacity int}
 type Dedup struct{shards [dedupShards]dedupShard;ttl time.Duration;capacity int}
-func NewDedup(n int,ttl time.Duration)(*Dedup,error){if n<=0||ttl<=0{return nil,ErrInvalidConfig};d:=&Dedup{ttl:ttl,capacity:n};base:=n/dedupShards;rem:=n%dedupShards;for i:=range d.shards{capn:=base;if i<rem{capn++};if capn==0{capn=1};d.shards[i]=dedupShard{m:make(map[string]dedupEntry,capn),capacity:capn}};return d,nil}
+func NewDedup(n int,ttl time.Duration)(*Dedup,error){if n<=0||ttl<=0{return nil,ErrInvalidConfig};d:=&Dedup{ttl:ttl,capacity:n};base:=n/dedupShards;rem:=n%dedupShards;for i:=range d.shards{capn:=base;if i<rem{capn++};if capn==0{capn=1};d.shards[i]=dedupShard{m:make(map[string]dedupEntry,capn),order:make([]string,0,capn),capacity:capn}};return d,nil}
 func (d *Dedup)shard(id string)*dedupShard{h:=fnv.New64a();_,_=h.Write([]byte(id));return &d.shards[h.Sum64()%dedupShards]}
 func(d *Dedup)SeenOrAdd(id string,now time.Time)bool{s:=d.shard(id);s.mu.Lock();defer s.mu.Unlock();d.expireLocked(s,now);if _,ok:=s.m[id];ok{return true};if len(s.m)>=s.capacity{old:=s.order[0];s.order=s.order[1:];delete(s.m,old)};s.m[id]=dedupEntry{expires:now.Add(d.ttl)};s.order=append(s.order,id);return false}
 func(d *Dedup)Forget(id string){s:=d.shard(id);s.mu.Lock();defer s.mu.Unlock();if _,ok:=s.m[id];!ok{return};delete(s.m,id);if len(s.order)>s.capacity*2{d.compactLocked(s)}}
