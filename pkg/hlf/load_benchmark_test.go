@@ -43,6 +43,7 @@ func TestHLFLoadLevels(t *testing.T) {
 	if testing.Short() { t.Skip("load qualification skipped in short mode") }
 	levels := []int{100_000, 250_000, 500_000}
 	if os.Getenv("HED_PERF_LEVELS") == "1" { levels = []int{100_000, 250_000, 500_000, 1_000_000, 2_700_000, 5_000_000} }
+	if os.Getenv("HED_PERF_LEVELS") == "2" { levels = []int{2_700_000} }
 	for _, n := range levels {
 		t.Run(loadLevelName(n), func(t *testing.T) {
 			c := newBenchmarkCommitter()
